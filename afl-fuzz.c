@@ -1389,7 +1389,7 @@ static void update_dfg_score(struct queue_entry *q_preserve) {
       q_next = q_remove->next;
       if (q_remove != q_preserve) {
         if (q_remove == first_unhandled)
-          first_unhandled = q_preserve;
+          first_unhandled = NULL;
         total_prox_score.original -= q_remove->prox_score.original;
         total_prox_score.adjusted -= q_remove->prox_score.adjusted;
         destroy_queue_entry(q_remove, 1);
