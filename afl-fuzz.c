@@ -42,6 +42,7 @@
 #include "debug.h"
 #include "alloc-inl.h"
 #include "hash.h"
+#include "afl-fuzz.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -248,50 +249,14 @@ static u32 max_queue_size = 4096;          /* Maximum input in queue            
 static u32 unique_dafl_input = 0;     /* Number of unique input with new coverage on def-use graph */
 static FILE* unique_dafl_log_file = NULL; /* File to record unique input with new coverage on def-use graph */
 
-struct proximity_score {
-  u64 original;
-  double adjusted;
-  u32 covered;
-  u32 *dfg_count_map; // Sparse map: [count]
-  u32 *dfg_dense_map; // Dense map: [index, count]
-};
-
-struct queue_entry {
-
-  u8* fname;                          /* File name for the test case      */
-  u32 len;                            /* Input length                     */
-
-  u8  cal_failed,                     /* Calibration failed?              */
-      trim_done,                      /* Trimmed?                         */
-      was_fuzzed,                     /* Had any fuzzing done yet?        */
-      handled_in_cycle,               /* Was handled in current cycle?    */
-      passed_det,                     /* Deterministic stages passed?     */
-      has_new_cov,                    /* Triggers new coverage?           */
-      var_behavior,                   /* Variable behavior?               */
-      favored,                        /* Currently favored?               */
-      fs_redundant,                   /* Marked as redundant in the fs?   */
-      removed;                        /* Removed from queue?              */
-
-  u32 bitmap_size,                    /* Number of bits set in bitmap     */
-      exec_cksum;                     /* Checksum of the execution trace  */
-
-  struct proximity_score prox_score;  /* Proximity score of the test case */
-  u32 entry_id;                       /* The ID assigned to the test case */
-
-  u64 exec_us,                        /* Execution time (us)              */
-      handicap,                       /* Number of queue cycles behind    */
-      depth;                          /* Path depth                       */
-
-  u8* trace_mini;                     /* Trace bytes, if kept             */
-  u32 tc_ref;                         /* Trace bytes ref count            */
-
-  struct queue_entry *next;           /* Next element, if any             */
-
-};
-
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
                           *queue_cur, /* Current offset within the queue  */
                           *queue_last;/* Lastly added to the queue        */
+
+static struct queue_entry *newly_added_queue;
+static struct queue_entry *recycled_queue;
+static struct queue_entry *dominated_queue;
+
 static struct queue_entry*
   first_unhandled;                    /* 1st unhandled item in the queue  */
 
