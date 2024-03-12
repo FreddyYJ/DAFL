@@ -35,6 +35,7 @@ struct queue_entry {
 
   struct proximity_score prox_score;  /* Proximity score of the test case */
   u32 entry_id;                       /* The ID assigned to the test case */
+  s32 rank;                           /* Pareto rank of the test case     */
 
   u64 exec_us,                        /* Execution time (us)              */
   handicap,                       /* Number of queue cycles behind    */
@@ -55,15 +56,15 @@ struct vector {
 };
 
 // Function to initialize a new vector
-struct vector* create_vector() {
+struct vector* vector_create(void) {
   struct vector* vec = ck_alloc(sizeof(struct vector));
   if (vec == NULL) {
     printf("Memory allocation failed.\n");
     exit(EXIT_FAILURE);
   }
-  vec->data = NULL;
   vec->size = 0;
   vec->capacity = 0;
+  vec->data = NULL;
   return vec;
 }
 
@@ -81,9 +82,51 @@ void push_back(struct vector* vec, struct queue_entry* element) {
   vec->data[vec->size++] = element;
 }
 
-void free_vector(struct vector* vec) {
-    ck_free(vec->data);
-    ck_free(vec);
+void vector_free(struct vector* vec) {
+  ck_free(vec->data);
+  ck_free(vec);
+}
+
+struct vector *list_to_vector(struct queue_entry *list) {
+  struct vector *vec = vector_create();
+  while (list != NULL) {
+    push_back(vec, list);
+    list = list->next;
+  }
+  return vec;
+}
+
+struct queue_entry *vector_to_list(struct vector *vec) {
+  struct queue_entry *list = NULL;
+  struct queue_entry *tail = NULL;
+  for (u32 i = 0; i < vec->size; i++) {
+    // Construct the list, skip the NULL entries
+    struct queue_entry *entry = vec->data[i];
+    if (entry) {
+      if (!list) list = entry;
+      if (tail) tail->next = entry;
+      tail = entry;
+      tail->next = NULL;
+    }
+  }
+  return list;
+}
+
+struct queue_entry* vector_get(struct vector* vec, u32 index) {
+  if (index >= vec->size) {
+    return NULL;
+  }
+  return vec->data[index];
+}
+
+void vector_set(struct vector* vec, u32 index, struct queue_entry* element) {
+  if (index < vec->size) {
+    vec->data[index] = element;
+  }
+}
+
+u32 vector_size(struct vector* vec) {
+  return vec->size;
 }
 
 // Hashmap
@@ -99,7 +142,7 @@ struct hashmap {
   struct key_value_pair** table;
 };
 
-struct hashmap* create_hashmap(u32 table_size) {
+struct hashmap* hashmap_create(u32 table_size) {
   struct hashmap* map = ck_alloc(sizeof(struct hashmap));
   if (map == NULL) {
     printf("Memory allocation failed.\n");
@@ -118,11 +161,11 @@ struct hashmap* create_hashmap(u32 table_size) {
   return map;
 }
 
-u32 fit_hashmap(u32 key, u32 table_size) {
+static u32 hashmap_fit(u32 key, u32 table_size) {
   return key % table_size;
 }
 
-void resize_table(struct hashmap *map) {
+static void hashmap_resize(struct hashmap *map) {
 
   u32 new_table_size = map->table_size * 2;
   struct key_value_pair **new_table = ck_alloc(new_table_size * sizeof(struct key_value_pair*));
@@ -134,7 +177,7 @@ void resize_table(struct hashmap *map) {
     struct key_value_pair* pair = map->table[i];
     while (pair != NULL) {
       struct key_value_pair *next = pair->next;
-      u32 index = fit_hashmap(pair->key, new_table_size);
+      u32 index = hashmap_fit(pair->key, new_table_size);
       pair->next = new_table[index];
       new_table[index] = pair;
       pair = next;
@@ -147,8 +190,8 @@ void resize_table(struct hashmap *map) {
 }
 
 // Function to insert a key-value pair into the hash map
-void insert(struct hashmap* map, u32 key, struct queue_entry* value) {
-  u32 index = fit_hashmap(key, map->table_size);
+void hashmap_insert(struct hashmap* map, u32 key, struct queue_entry* value) {
+  u32 index = hashmap_fit(key, map->table_size);
   struct key_value_pair* newPair = ck_alloc(sizeof(struct key_value_pair));
   if (newPair == NULL) {
     printf("Memory allocation failed.\n");
@@ -160,12 +203,12 @@ void insert(struct hashmap* map, u32 key, struct queue_entry* value) {
   map->table[index] = newPair;
   map->size++;
   if (map->size > map->table_size / 2) {
-    resize_table(map);
+    hashmap_resize(map);
   }
 }
 
-struct key_value_pair* get_from_hashmap(struct hashmap* map, u32 key) {
-  u32 index = fit_hashmap(key, map->table_size);
+struct key_value_pair* hashmap_get(struct hashmap* map, u32 key) {
+  u32 index = hashmap_fit(key, map->table_size);
   struct key_value_pair* pair = map->table[index];
   while (pair != NULL) {
     if (pair->key == key) {
@@ -176,7 +219,7 @@ struct key_value_pair* get_from_hashmap(struct hashmap* map, u32 key) {
   return NULL;
 }
 
-void free_hashmap(struct hashmap* map) {
+void hashmap_free(struct hashmap* map) {
   for (u32 i = 0; i < map->table_size; i++) {
     struct key_value_pair* pair = map->table[i];
     while (pair != NULL) {

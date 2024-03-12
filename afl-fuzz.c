@@ -253,9 +253,12 @@ static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
                           *queue_cur, /* Current offset within the queue  */
                           *queue_last;/* Lastly added to the queue        */
 
+static struct queue_entry *pareto_frontier_queue;
 static struct queue_entry *newly_added_queue;
 static struct queue_entry *recycled_queue;
 static struct queue_entry *dominated_queue;
+
+static s32 queue_rank = -1;           /* Rank of the queue entry           */
 
 static struct queue_entry*
   first_unhandled;                    /* 1st unhandled item in the queue  */
@@ -850,6 +853,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   q->passed_det   = passed_det;
   q->prox_score   = *prox_score;
   q->entry_id     = queued_paths;
+  q->rank         = queue_rank + 1;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
@@ -1704,6 +1708,107 @@ static void cull_queue(void) {
 
 }
 
+static s32 check_domiance(struct proximity_score *a, struct proximity_score *b) {
+  // Compare two entries based on the proximity score domination
+  // Return 1 if a > b, -1 if a < b
+  if (a->original > b->original && a->adjusted > b->adjusted) {
+    return 1;
+  } else if (a->original < b->original && a->adjusted < b->adjusted) {
+    return -1;
+  }
+  return 0;
+}
+
+static void update_ranks(struct queue_entry *a, struct queue_entry *b) {
+  struct proximity_score *prox_score_a = &a->prox_score;
+  struct proximity_score *prox_score_b = &b->prox_score;
+  // Compare two entries based on the proximity score domination
+  s32 dominance = check_domiance(prox_score_a, prox_score_b);
+  if (dominance > 0) {
+    a->rank++;
+  } else if (dominance < 0) {
+    b->rank++;
+  }
+}
+
+static struct queue_entry* select_next_entry(u8 use_moo_scheduler) {
+
+  struct queue_entry* q = NULL;
+  if (!use_moo_scheduler) {
+    // Use the default scheduler
+    q = queue_cur;
+    if (first_unhandled) { // This is set only when a new item was added.
+      q = first_unhandled;
+      first_unhandled = NULL;
+    } else { // Proceed to the next unhandled item in the queue.
+      while (q && q->handled_in_cycle) {
+        q = q->next;
+      }
+    }
+    return q;
+  }
+
+  // Use the MOO scheduler
+  if (!pareto_frontier_queue) {
+    // If the pareto frontier queue is empty, select from the dominated queue
+    // First, update the dominated queue with the new entries
+    struct vector *new_entries = list_to_vector(newly_added_queue);
+    q = vector_get(new_entries, vector_size(new_entries) - 1);
+    if (q) {
+      q->next = dominated_queue;
+      dominated_queue = vector_get(new_entries, 0);
+      newly_added_queue = NULL;
+    }
+    q = dominated_queue;
+    for (u32 i = 0; i < vector_size(new_entries); i++) {
+      while (q) {
+        update_ranks(q, vector_get(new_entries, i));
+        q = q->next;
+      }
+    }
+    vector_free(new_entries);
+    // If the dominated queue is empty, select from the recycled queue
+    if (!dominated_queue) {
+      queue_rank = -1;
+      q = recycled_queue;
+      while (q) {
+        q->rank = 0;
+        q = q->next;
+      }
+      dominated_queue = recycled_queue;
+      q = dominated_queue;
+      struct queue_entry *q_next = q;
+      recycled_queue = NULL;
+      while (q) {
+        update_ranks(q, q_next);
+      }
+    }
+    queue_rank++;
+    q = NULL;
+    struct vector *ranked_vec = list_to_vector(dominated_queue);
+    for (u32 i = 0; i < vector_size(ranked_vec); i++) {
+      struct queue_entry *entry = vector_get(ranked_vec, i);
+      if (q->rank == queue_rank) {
+        if (q) {
+          q->next = entry;
+        } else {
+          pareto_frontier_queue = entry;
+        }
+        q = entry;
+        q->next = NULL;
+        vector_set(ranked_vec, i, NULL);
+      }
+    }
+    dominated_queue = vector_to_list(ranked_vec);
+    vector_free(ranked_vec);
+  }
+  // Select from the pareto frontier queue
+  q = pareto_frontier_queue;
+  q->next = recycled_queue;
+  pareto_frontier_queue = pareto_frontier_queue->next;
+  return q;
+
+}
 
 /* Configure shared memory and virgin_bits. This is called at startup. */
 
@@ -8548,13 +8653,8 @@ int main(int argc, char** argv) {
 
     if (stop_soon) break;
 
-    if (first_unhandled) { // This is set only when a new item was added.
-      queue_cur = first_unhandled;
-      first_unhandled = NULL;
-    } else { // Proceed to the next unhandled item in the queue.
-      while (queue_cur && queue_cur->handled_in_cycle)
-        queue_cur = queue_cur->next;
-    }
+    queue_cur = select_next_entry(0);
+
   }
 
   if (queue_cur) show_stats();
