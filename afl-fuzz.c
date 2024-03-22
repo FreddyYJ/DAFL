@@ -259,6 +259,7 @@ static struct queue_entry *recycled_queue;
 static struct queue_entry *dominated_queue;
 
 static s32 queue_rank = -1;           /* Rank of the queue entry           */
+static u8 use_moo_scheduler = 1;         /* Scheduling mode                  */
 
 static struct queue_entry*
   first_unhandled;                    /* 1st unhandled item in the queue  */
@@ -284,7 +285,10 @@ static u32 a_extras_cnt;              /* Total number of tokens available */
 static struct proximity_score max_prox_score;        /* Maximum score of the seed queue  */
 static struct proximity_score min_prox_score; /* Minimum score of the seed queue  */
 static struct proximity_score total_prox_score; /* Sum of proximity scores          */
-static struct proximity_score avg_prox_score;                                                                            /* Average of proximity scores      */
+static struct proximity_score avg_prox_score; /* Average of proximity scores      */
+
+static struct hashmap *dfg_hashmap;     /* Hashmap for DFG coverage         */
+
 static u32 no_dfg_schedule = 0;      /* No DFG-based seed scheduling     */
 static u32 t_x = 0;                   /* To test AFLGo's scheduling       */
 
@@ -841,6 +845,11 @@ static void sorted_insert_to_queue(struct queue_entry* q) {
 
 }
 
+static void moo_insert_to_queue(struct queue_entry *q) {
+  q->next = newly_added_queue;
+  newly_added_queue = q;
+}
+
 /* Append new test case to the queue. */
 
 static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_score *prox_score) {
@@ -857,7 +866,8 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
 
   if (q->depth > max_depth) max_depth = q->depth;
 
-  sorted_insert_to_queue(q);
+  if (use_moo_scheduler) moo_insert_to_queue(q);
+  else sorted_insert_to_queue(q);
 
   queue_last = q;
   queued_paths++;
@@ -1142,6 +1152,14 @@ static u32 count_non_255_bytes(u8* mem) {
 
 static void update_dfg_count_map(struct queue_entry *q) {
 
+  if (use_moo_scheduler) {
+    u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+    struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
+    if (kvp) {
+      // Not unique
+    }
+  }
+
   u32 i = DFG_MAP_SIZE;
   u8 is_unique = 0;
 
@@ -1319,6 +1337,9 @@ static void update_dfg_score(struct queue_entry *q_preserve) {
    * Update [min|max|total|avg]_prox_score
    * Keep the queue size under the limit
   */
+  if (use_moo_scheduler) {
+    return;
+  }
   u64 start_time = get_cur_time();
   init_global_prox_score();
   memset(shortcut_per_100, 0, 1024 * sizeof(struct queue_entry*));
@@ -1731,7 +1752,7 @@ static void update_ranks(struct queue_entry *a, struct queue_entry *b) {
   }
 }
 
-static struct queue_entry* select_next_entry(u8 use_moo_scheduler) {
+static struct queue_entry* select_next_entry() {
 
   struct queue_entry* q = NULL;
   if (!use_moo_scheduler) {
@@ -8288,7 +8309,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:")) > 0)
 
     switch (opt) {
 
@@ -8488,9 +8509,18 @@ int main(int argc, char** argv) {
         proximity_score_allowance = atoi(optarg);
         break;
 
-      default:
+    case 's':    /* Parameter to set scheduler */
+      if (optarg[0] == 'm')
+        use_moo_scheduler = 1;
+      else if (optarg[0] == 'd')
+        use_moo_scheduler = 0;
+      else
+        use_moo_scheduler = 1;
+      break;
 
-        usage(argv[0]);
+    default:
+
+      usage(argv[0]);
 
     }
 
@@ -8553,6 +8583,7 @@ int main(int argc, char** argv) {
   init_count_class16();
   init_global_prox_score();
   dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
+  dfg_hashmap = hashmap_create(max_queue_size);
 
   setup_dirs_fds();
   read_testcases();
@@ -8653,7 +8684,7 @@ int main(int argc, char** argv) {
 
     if (stop_soon) break;
 
-    queue_cur = select_next_entry(0);
+    queue_cur = select_next_entry();
 
   }
 
