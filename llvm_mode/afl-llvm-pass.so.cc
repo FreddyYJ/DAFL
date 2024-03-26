@@ -37,6 +37,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <string>
 #include <set>
 
 #include <stdio.h>
@@ -96,10 +97,15 @@ void initDFGNodeMap(char* dfg_file) {
   std::ifstream stream(dfg_file);
 
   while (std::getline(stream, line)) {
-    std::size_t space_idx = line.find(" ");
-    std::string score_str = line.substr(0, space_idx);
-    std::string targ_line = line.substr(space_idx + 1, std::string::npos);
-    int score = stoi(score_str);
+    std::istringstream iss(line);
+    u32 score, max_paths;
+    std::string targ_line;
+    iss >> score >> max_paths >> targ_line;
+    // std::size_t space_idx = line.find(" ");
+    // std::string score_str = line.substr(0, space_idx);
+    // std::string targ_line = line.substr(space_idx + 1, std::string::npos);
+    // int score = stoi(score_str);
+    // std::cout << "[dfg] [node " << targ_line << "] [score " << score << "] [max-paths " << max_paths << "] [idx " << idx << "]\n";
     dfg_node_map[targ_line] = std::make_pair(idx++, (unsigned int) score);
     if (idx >= DFG_MAP_SIZE) {
       std::cout << "Input DFG is too large (check DFG_MAP_SIZE)" << std::endl;
