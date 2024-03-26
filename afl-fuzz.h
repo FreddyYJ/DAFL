@@ -14,6 +14,12 @@ struct proximity_score {
   u32 *dfg_dense_map; // Dense map: [index, count]
 };
 
+struct dfg_node_info {
+  u32 idx;
+  u32 score;
+  u32 max_paths;
+};
+
 struct queue_entry {
 
   u8* fname;                          /* File name for the test case      */

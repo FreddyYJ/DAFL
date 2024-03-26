@@ -151,6 +151,8 @@ static s32 forksrv_pid,               /* PID of the fork server           */
 EXP_ST u8* trace_bits;                /* SHM with code coverage bitmap    */
 EXP_ST u32* dfg_bits;                 /* SHM with DFG coverage bitmap     */
 EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
+EXP_ST struct dfg_node_info *dfg_node_info_map; /* DFG node info          */
+EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -1155,11 +1157,18 @@ static u32 count_non_255_bytes(u8* mem) {
 
 static void update_dfg_count_map(struct queue_entry *q) {
 
-  if (use_moo_scheduler) {
+  if (0) {
+
     u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
     struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
-    if (kvp) {
-      // Not unique
+    if (!kvp) {
+      // Unique: update the hashmap, dfg_count_map
+      hashmap_insert(dfg_hashmap, checksum, q);
+      for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+        if (dfg_bits[i]) {
+          dfg_count_map[i]++;
+        }
+      }
     }
   }
 
@@ -1311,6 +1320,37 @@ static void init_global_prox_score() {
   total_prox_score.adjusted = .0;
   avg_prox_score.original = .0;
   avg_prox_score.adjusted = .0;
+}
+
+static void init_dfg(u8* dfg_node_info_file) {
+
+  dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
+  dfg_hashmap = hashmap_create(max_queue_size);
+  if (!use_moo_scheduler) return;
+
+  FILE *file = fopen(dfg_node_info_file, "r");
+  if (!file) {
+    PFATAL("Unable to open '%s'", dfg_node_info_file);
+  }
+  dfg_node_info_map = ck_alloc(DFG_MAP_SIZE * sizeof(struct dfg_node_info));
+  u32 idx = 0, max_score = 0;
+  u32 score, max_paths;
+  u8 node_name[256];
+  // Read the score and max_paths
+  while(fscanf(file, "%d %d %255s", &score, &max_paths, node_name) == 3) {
+    // Insert to dfg_node_info_map
+    struct dfg_node_info *node_info = &dfg_node_info_map[idx];
+    node_info->idx = idx;
+    node_info->score = score;
+    node_info->max_paths = max_paths;
+    if (score > max_score) {
+      max_score = score;
+      dfg_target_idx = idx;
+    }
+    idx++;
+  }
+  fclose(file);
+
 }
 
 static void update_global_prox_score(struct proximity_score *prox_score) {
@@ -3926,7 +3966,7 @@ keep_as_crash:
 #ifndef SIMPLE_FILES
 
       fn = alloc_printf("%s/normals/id:%06llu,%llu,sig:%02u,%s", out_dir,
-                        total_normals, prox_score, kill_signal,
+                        total_normals, prox_score.original, kill_signal,
                         describe_op(0));
 
 #else
@@ -8431,6 +8471,7 @@ int main(int argc, char** argv) {
   u64 prev_queued = 0;
   u32 sync_interval_cnt = 0;
   u8  *extras_dir = 0;
+  u8  *dfg_node_info_file = 0;
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
   char** use_argv;
@@ -8445,7 +8486,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:")) > 0)
 
     switch (opt) {
 
@@ -8654,6 +8695,10 @@ int main(int argc, char** argv) {
         use_moo_scheduler = 1;
       break;
 
+    case 'p':    /* Set dfg_node_info_file */
+      dfg_node_info_file = optarg;
+      break;
+
     default:
 
       usage(argv[0]);
@@ -8718,8 +8763,7 @@ int main(int argc, char** argv) {
   setup_shm();
   init_count_class16();
   init_global_prox_score();
-  dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
-  dfg_hashmap = hashmap_create(max_queue_size);
+  init_dfg(dfg_node_info_file);
 
   setup_dirs_fds();
   read_testcases();
