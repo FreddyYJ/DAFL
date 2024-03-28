@@ -265,6 +265,7 @@ static struct queue_entry *dominated_queue;
 
 static s32 queue_rank = -1;           /* Rank of the queue entry           */
 static u8 use_moo_scheduler = 1;      /* Scheduling mode                  */
+static u32 moo_cycle = 0;             /* Current moo cycle                */
 static u8 use_dafl_coverage = 0;      /* Use dfg_bits for checking unique path */
 
 static struct queue_entry*
@@ -1849,6 +1850,7 @@ static struct queue_entry* select_next_entry() {
         q = q->next;
       }
     }
+    fprintf(unique_dafl_log_file, "[sche] [defa] [id %u] [handled %u]\n", q->entry_id, q->handled_in_cycle);
     return q;
   }
 
@@ -1856,6 +1858,7 @@ static struct queue_entry* select_next_entry() {
   if (!pareto_frontier_queue) {
     // If the pareto frontier queue is empty, select from the dominated queue
     // First, update the dominated queue with the new entries
+    moo_cycle++;
     struct vector *new_entries = list_to_vector(newly_added_queue);
     q = vector_get(new_entries, vector_size(new_entries) - 1);
     if (q) {
@@ -1911,6 +1914,7 @@ static struct queue_entry* select_next_entry() {
   pareto_frontier_queue = q->next_moo;
   q->next_moo = recycled_queue;
   recycled_queue = q;
+  fprintf(unique_dafl_log_file, "[sche] [moo] [id %u] [rank %d] [cycle %u]\n", q->entry_id, q->rank, moo_cycle);
 
   return q;
 
