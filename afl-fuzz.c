@@ -1158,9 +1158,15 @@ static u32 count_non_255_bytes(u8* mem) {
 
 }
 
+static u8 check_covered_target() {
+  if (dfg_target_idx < DFG_MAP_SIZE)
+    return dfg_bits[dfg_target_idx] != 0;
+  return 0;
+}
+
 static void update_dfg_count_map(struct queue_entry *q) {
 
-  if (use_moo_scheduler && q) {
+  if (use_moo_scheduler && q && check_covered_target()) {
 
     if (!q->dfg_cksum) {
       q->dfg_cksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
@@ -3808,12 +3814,6 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   FILE *fp = popen(cmd, "r");
   if (fp == NULL) return;
   pclose(fp);
-}
-
-static u8 check_covered_target() {
-  if (dfg_target_idx < DFG_MAP_SIZE)
-    return dfg_bits[dfg_target_idx] != 0;
-  return 0;
 }
 
 static u8 check_unique_path() {
