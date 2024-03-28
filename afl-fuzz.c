@@ -1850,7 +1850,8 @@ static struct queue_entry* select_next_entry() {
         q = q->next;
       }
     }
-    fprintf(unique_dafl_log_file, "[sche] [defa] [id %u] [handled %u]\n", q->entry_id, q->handled_in_cycle);
+    if (!q)
+      fprintf(unique_dafl_log_file, "[sche] [defa] [id %u] [handled %u]\n", q->entry_id, q->handled_in_cycle);
     return q;
   }
 
@@ -1914,7 +1915,8 @@ static struct queue_entry* select_next_entry() {
   pareto_frontier_queue = q->next_moo;
   q->next_moo = recycled_queue;
   recycled_queue = q;
-  fprintf(unique_dafl_log_file, "[sche] [moo] [id %u] [rank %d] [cycle %u]\n", q->entry_id, q->rank, moo_cycle);
+  if (!q)
+    fprintf(unique_dafl_log_file, "[sche] [moo] [id %u] [rank %d] [cycle %u]\n", q->entry_id, q->rank, moo_cycle);
 
   return q;
 
