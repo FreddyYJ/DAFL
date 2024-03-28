@@ -264,7 +264,8 @@ static struct queue_entry *recycled_queue;
 static struct queue_entry *dominated_queue;
 
 static s32 queue_rank = -1;           /* Rank of the queue entry           */
-static u8 use_moo_scheduler = 1;         /* Scheduling mode                  */
+static u8 use_moo_scheduler = 1;      /* Scheduling mode                  */
+static u8 use_dafl_coverage = 0;      /* Use dfg_bits for checking unique path */
 
 static struct queue_entry*
   first_unhandled;                    /* 1st unhandled item in the queue  */
@@ -1349,6 +1350,13 @@ static void init_dfg(u8* dfg_node_info_file) {
 
   dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
   dfg_hashmap = hashmap_create(max_queue_size);
+  if (!dfg_node_info_file) {
+    if (use_moo_scheduler) {
+      PFATAL("dfg_node_info_file (-p option) is required for MOO scheduler");
+    } else {
+      return;
+    }
+  }
 
   FILE *file = fopen(dfg_node_info_file, "r");
   if (!file) {
