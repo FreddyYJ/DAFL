@@ -851,8 +851,10 @@ static void sorted_insert_to_queue(struct queue_entry* q) {
 }
 
 static void moo_insert_to_queue(struct queue_entry *q) {
-  q->next = newly_added_queue;
+  q->next_moo = newly_added_queue;
   newly_added_queue = q;
+  q->next = queue;
+  queue = q;
 }
 
 /* Append new test case to the queue. */
@@ -1840,7 +1842,7 @@ static struct queue_entry* select_next_entry() {
     struct vector *new_entries = list_to_vector(newly_added_queue);
     q = vector_get(new_entries, vector_size(new_entries) - 1);
     if (q) {
-      q->next = dominated_queue;
+      q->next_moo = dominated_queue;
       dominated_queue = vector_get(new_entries, 0);
       newly_added_queue = NULL;
     }
@@ -1848,7 +1850,7 @@ static struct queue_entry* select_next_entry() {
     for (u32 i = 0; i < vector_size(new_entries); i++) {
       while (q) {
         update_ranks(q, vector_get(new_entries, i));
-        q = q->next;
+        q = q->next_moo;
       }
     }
     vector_free(new_entries);
@@ -1858,7 +1860,7 @@ static struct queue_entry* select_next_entry() {
       q = recycled_queue;
       while (q) {
         q->rank = 0;
-        q = q->next;
+        q = q->next_moo;
       }
       dominated_queue = recycled_queue;
       q = dominated_queue;
@@ -1875,12 +1877,12 @@ static struct queue_entry* select_next_entry() {
       struct queue_entry *entry = vector_get(ranked_vec, i);
       if (entry->rank == queue_rank) {
         if (q) {
-          q->next = entry;
+          q->next_moo = entry;
         } else {
           pareto_frontier_queue = entry;
         }
         q = entry;
-        q->next = NULL;
+        q->next_moo = NULL;
         vector_set(ranked_vec, i, NULL);
       }
     }
@@ -1889,8 +1891,8 @@ static struct queue_entry* select_next_entry() {
   }
   // Pop from pareto_frontier_queue, push to recycled_queue
   q = pareto_frontier_queue;
-  pareto_frontier_queue = q->next;
-  q->next = recycled_queue;
+  pareto_frontier_queue = q->next_moo;
+  q->next_moo = recycled_queue;
   recycled_queue = q;
 
   return q;
@@ -3810,6 +3812,9 @@ static u8 check_unique_path() {
   u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
   struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
   if (!kvp) {
+    if (not_on_tty) {
+      ACTF("Found unique path %u, checksum %u", queued_paths, checksum);
+    }
     hashmap_insert(dfg_hashmap, checksum, NULL);
     update_dfg_count_map(NULL);
     return 1;
@@ -3827,14 +3832,14 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8  hnb;
   s32 fd;
   u8  keeping = 0, res;
-  u8 maybe_add_to_queue = (fault == crash_mode);
+  u8 maybe_add_to_queue = 0;
   struct proximity_score prox_score;
 
   if (use_moo_scheduler) {
-    maybe_add_to_queue = (maybe_add_to_queue || check_unique_path());
+    maybe_add_to_queue = check_unique_path();
   }
 
-  if (maybe_add_to_queue) {
+  if ((fault == crash_mode) || maybe_add_to_queue) {
 
     hnb = has_new_bits(virgin_bits);
     if (hnb) {
@@ -3847,7 +3852,16 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     //   return 0;
     // }
       compute_proximity_score(&prox_score, dfg_bits, 0);
-
+      if (not_on_tty) {
+        ACTF("[new-q] [id %u] [moo-id %u] [uniq %u] [cov %u] [prox %llu] [adj %f]", queued_paths, hashmap_size(dfg_hashmap), maybe_add_to_queue, prox_score.covered, prox_score.original, prox_score.adjusted);
+      }
+      if (maybe_add_to_queue) {
+          fprintf(unique_dafl_log_file, "[moo] [uniq] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f]\n",
+                  queued_paths, hashmap_size(dfg_hashmap), prox_score.covered, prox_score.original, prox_score.adjusted);
+      } else {
+          fprintf(unique_dafl_log_file, "[moo] [no-uniq] [id %u] [cov %u] [prox %llu] [adj %f] [tgt %u]\n",
+                  queued_paths, prox_score.covered, prox_score.original, prox_score.adjusted, check_covered_target());
+      }
 #ifndef SIMPLE_FILES
 
       fn = alloc_printf("%s/queue/id:%06u,%llu,%s", out_dir, queued_paths,
@@ -3883,6 +3897,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       close(fd);
 
       keeping = 1;
+    } else if (maybe_add_to_queue) {
+      if (not_on_tty)
+        ACTF("[moo] [skip-q] [id %u] [moo-id %u] [uniq %u] no new bits", queued_paths, hashmap_size(dfg_hashmap), maybe_add_to_queue);
+      fprintf(unique_dafl_log_file, "[moo] [uniq-skip] [id %u] [moo-id %u]\n", queued_paths, hashmap_size(dfg_hashmap));
     }
 
   }
@@ -4033,7 +4051,10 @@ keep_as_crash:
 
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
-
+  if (maybe_add_to_queue) {
+    fprintf(unique_dafl_log_file, "[moo] [save] [id %u] [moo-id %u] [fault %u] [file %s]\n",
+            queued_paths, hashmap_size(dfg_hashmap), fault, fn);
+  }
   fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0) PFATAL("Unable to create '%s'", fn);
   ck_write(fd, mem, len, fn);
@@ -8856,8 +8877,6 @@ int main(int argc, char** argv) {
     start_time += 4000;
     if (stop_soon) goto stop_fuzzing;
   }
-
-  queue_cur = select_next_entry();
 
   while (1) {
 

@@ -52,6 +52,7 @@ struct queue_entry {
   u32 tc_ref;                         /* Trace bytes ref count            */
 
   struct queue_entry *next;           /* Next element, if any             */
+  struct queue_entry *next_moo;       /* Next element in the MOO queue    */
 
 };
 
@@ -98,7 +99,7 @@ struct vector *list_to_vector(struct queue_entry *list) {
   struct vector *vec = vector_create();
   while (list != NULL) {
     push_back(vec, list);
-    list = list->next;
+    list = list->next_moo;
   }
   return vec;
 }
@@ -111,9 +112,9 @@ struct queue_entry *vector_to_list(struct vector *vec) {
     struct queue_entry *entry = vec->data[i];
     if (entry) {
       if (!list) list = entry;
-      if (tail) tail->next = entry;
+      if (tail) tail->next_moo = entry;
       tail = entry;
-      tail->next = NULL;
+      tail->next_moo = NULL;
     }
   }
   return list;
@@ -194,6 +195,10 @@ static void hashmap_resize(struct hashmap *map) {
   map->table = new_table;
   map->table_size = new_table_size;
 
+}
+
+u32 hashmap_size(struct hashmap* map) {
+  return map->size;
 }
 
 // Function to insert a key-value pair into the hash map
