@@ -151,7 +151,7 @@ static s32 forksrv_pid,               /* PID of the fork server           */
 EXP_ST u8* trace_bits;                /* SHM with code coverage bitmap    */
 EXP_ST u32* dfg_bits;                 /* SHM with DFG coverage bitmap     */
 EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
-EXP_ST struct dfg_node_info *dfg_node_info_map; /* DFG node info          */
+EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
 EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
@@ -1349,12 +1349,15 @@ static void init_dfg(u8* dfg_node_info_file) {
 
   dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
   dfg_hashmap = hashmap_create(max_queue_size);
-  if (!use_moo_scheduler) return;
 
   FILE *file = fopen(dfg_node_info_file, "r");
   if (!file) {
-    PFATAL("Unable to open '%s'", dfg_node_info_file);
+    if (use_moo_scheduler)
+      PFATAL("Unable to open '%s'", dfg_node_info_file);
+    else
+      return;
   }
+
   dfg_node_info_map = ck_alloc(DFG_MAP_SIZE * sizeof(struct dfg_node_info));
   u32 idx = 0, max_score = 0;
   u32 score, max_paths;
@@ -3832,14 +3835,14 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8  hnb;
   s32 fd;
   u8  keeping = 0, res;
-  u8 maybe_add_to_queue = 0;
+  u8 has_valid_unique_path = 0;
   struct proximity_score prox_score;
 
-  if (use_moo_scheduler) {
-    maybe_add_to_queue = check_unique_path();
+  if (dfg_node_info_map) {
+    has_valid_unique_path = check_unique_path();
   }
 
-  if ((fault == crash_mode) || maybe_add_to_queue) {
+  if ((fault == crash_mode) || (use_moo_scheduler && has_valid_unique_path)) {
 
     hnb = has_new_bits(virgin_bits);
     if (hnb) {
@@ -3853,9 +3856,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     // }
       compute_proximity_score(&prox_score, dfg_bits, 0);
       if (not_on_tty) {
-        ACTF("[new-q] [id %u] [moo-id %u] [uniq %u] [cov %u] [prox %llu] [adj %f]", queued_paths, hashmap_size(dfg_hashmap), maybe_add_to_queue, prox_score.covered, prox_score.original, prox_score.adjusted);
+        ACTF("[new-q] [id %u] [moo-id %u] [uniq %u] [cov %u] [prox %llu] [adj %f]",
+             queued_paths, hashmap_size(dfg_hashmap), has_valid_unique_path, prox_score.covered, prox_score.original, prox_score.adjusted);
       }
-      if (maybe_add_to_queue) {
+      if (has_valid_unique_path) {
           fprintf(unique_dafl_log_file, "[moo] [uniq] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f]\n",
                   queued_paths, hashmap_size(dfg_hashmap), prox_score.covered, prox_score.original, prox_score.adjusted);
       } else {
@@ -3897,9 +3901,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       close(fd);
 
       keeping = 1;
-    } else if (maybe_add_to_queue) {
+    } else if (has_valid_unique_path) {
       if (not_on_tty)
-        ACTF("[moo] [skip-q] [id %u] [moo-id %u] [uniq %u] no new bits", queued_paths, hashmap_size(dfg_hashmap), maybe_add_to_queue);
+        ACTF("[moo] [skip-q] [id %u] [moo-id %u] [uniq %u] no new bits", queued_paths, hashmap_size(dfg_hashmap), has_valid_unique_path);
       fprintf(unique_dafl_log_file, "[moo] [uniq-skip] [id %u] [moo-id %u]\n", queued_paths, hashmap_size(dfg_hashmap));
     }
 
@@ -4051,7 +4055,7 @@ keep_as_crash:
 
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
-  if (maybe_add_to_queue) {
+  if (has_valid_unique_path) {
     fprintf(unique_dafl_log_file, "[moo] [save] [id %u] [moo-id %u] [fault %u] [file %s]\n",
             queued_paths, hashmap_size(dfg_hashmap), fault, fn);
   }
