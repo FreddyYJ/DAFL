@@ -37,7 +37,8 @@ struct queue_entry {
   removed;                        /* Removed from queue?              */
 
   u32 bitmap_size,                    /* Number of bits set in bitmap     */
-  exec_cksum;                     /* Checksum of the execution trace  */
+  exec_cksum,                     /* Checksum of the execution trace  */
+  dfg_cksum;
 
   struct proximity_score prox_score;  /* Proximity score of the test case */
   u32 entry_id;                       /* The ID assigned to the test case */

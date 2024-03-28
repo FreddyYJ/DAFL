@@ -1157,19 +1157,22 @@ static u32 count_non_255_bytes(u8* mem) {
 
 static void update_dfg_count_map(struct queue_entry *q) {
 
-  if (0) {
+  if (use_moo_scheduler && q) {
 
-    u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+    if (!q->dfg_cksum) {
+      q->dfg_cksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+    }
+    u32 checksum = q->dfg_cksum;
     struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
     if (!kvp) {
       // Unique: update the hashmap, dfg_count_map
       hashmap_insert(dfg_hashmap, checksum, q);
-      for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
-        if (dfg_bits[i]) {
-          dfg_count_map[i]++;
-        }
-      }
+    } else if (!kvp->value) {
+      // Already handled in check_unique_path()
+      kvp->value = q;
     }
+    return;
+
   }
 
   u32 i = DFG_MAP_SIZE;
@@ -1184,6 +1187,8 @@ static void update_dfg_count_map(struct queue_entry *q) {
     }
   
   }
+
+  if (!q) return;
 
   if (is_unique) {
     unique_dafl_input++;
@@ -1275,7 +1280,15 @@ static void compute_proximity_score(struct proximity_score *prox_score, u32 *dfg
     covered++;
     orig_score += score;
     u32 c = dfg_count_map[i];
-    adjusted_score += compute_reduced_score(score, c);
+    if (use_moo_scheduler) {
+      u32 max_paths = dfg_node_info_map[i].max_paths;
+      if (c > max_paths) {
+        c = max_paths;
+      }
+      adjusted_score += (max_paths - c);
+    } else {
+      adjusted_score += compute_reduced_score(score, c);
+    }
   }
 
   prox_score->original = orig_score;
@@ -1297,7 +1310,15 @@ static u8 recompute_proximity_score(struct queue_entry* q) {
       u32 index = q->prox_score.dfg_dense_map[i * 2];
       u32 score = q->prox_score.dfg_dense_map[i * 2 + 1];
       u32 count = dfg_count_map[index];
-      adjusted_score += compute_reduced_score(score, count);
+      if (use_moo_scheduler) {
+        u32 max_paths = dfg_node_info_map[index].max_paths;
+        if (count > max_paths) {
+          count = max_paths;
+        }
+        adjusted_score += (max_paths - count);
+      } else {
+        adjusted_score += compute_reduced_score(score, count);
+      }
     }
     q->prox_score.adjusted = adjusted_score;
     return 0;
@@ -1852,7 +1873,7 @@ static struct queue_entry* select_next_entry() {
     struct vector *ranked_vec = list_to_vector(dominated_queue);
     for (u32 i = 0; i < vector_size(ranked_vec); i++) {
       struct queue_entry *entry = vector_get(ranked_vec, i);
-      if (q->rank == queue_rank) {
+      if (entry->rank == queue_rank) {
         if (q) {
           q->next = entry;
         } else {
@@ -1866,10 +1887,12 @@ static struct queue_entry* select_next_entry() {
     dominated_queue = vector_to_list(ranked_vec);
     vector_free(ranked_vec);
   }
-  // Select from the pareto frontier queue
+  // Pop from pareto_frontier_queue, push to recycled_queue
   q = pareto_frontier_queue;
+  pareto_frontier_queue = q->next;
   q->next = recycled_queue;
-  pareto_frontier_queue = pareto_frontier_queue->next;
+  recycled_queue = q;
+
   return q;
 
 }
@@ -3774,6 +3797,25 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   pclose(fp);
 }
 
+static u8 check_covered_target() {
+  if (dfg_target_idx < DFG_MAP_SIZE)
+    return dfg_bits[dfg_target_idx] != 0;
+  return 0;
+}
+
+static u8 check_unique_path() {
+  if (!check_covered_target()) return 0;
+  // q->trace_mini = ck_alloc(MAP_SIZE >> 3);
+  // minimize_bits(q->trace_mini, trace_bits);
+  u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+  struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
+  if (!kvp) {
+    hashmap_insert(dfg_hashmap, checksum, NULL);
+    update_dfg_count_map(NULL);
+    return 1;
+  }
+  return 0;
+}
 
 /* Check if the result of an execve() during routine fuzzing is interesting,
    save or queue the input test case for further analysis if so. Returns 1 if
@@ -3785,9 +3827,14 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8  hnb;
   s32 fd;
   u8  keeping = 0, res;
+  u8 maybe_add_to_queue = (fault == crash_mode);
   struct proximity_score prox_score;
 
-  if (fault == crash_mode) {
+  if (use_moo_scheduler) {
+    maybe_add_to_queue = (maybe_add_to_queue || check_unique_path());
+  }
+
+  if (maybe_add_to_queue) {
 
     hnb = has_new_bits(virgin_bits);
     if (hnb) {
@@ -3820,6 +3867,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       }
 
       queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
+      queue_last->dfg_cksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
@@ -8809,6 +8857,8 @@ int main(int argc, char** argv) {
     if (stop_soon) goto stop_fuzzing;
   }
 
+  queue_cur = select_next_entry();
+
   while (1) {
 
     u8 skipped_fuzz;
@@ -8904,6 +8954,7 @@ stop_fuzzing:
   fclose(unique_dafl_log_file);
   destroy_queue();
   destroy_extras();
+  hashmap_free(dfg_hashmap);
   ck_free(target_path);
   ck_free(sync_id);
   ck_free(dfg_count_map);
