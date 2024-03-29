@@ -59,6 +59,7 @@ bool dfg_scoring = false;
 bool no_filename_match = false;
 std::set<std::string> instr_targets;
 std::map<std::string,std::pair<unsigned int,unsigned int>> dfg_node_map;
+std::map<std::string,unsigned long long> dfg_path_map;
 
 
 namespace {
@@ -98,9 +99,13 @@ void initDFGNodeMap(char* dfg_file) {
   while (std::getline(stream, line)) {
     std::size_t space_idx = line.find(" ");
     std::string score_str = line.substr(0, space_idx);
-    std::string targ_line = line.substr(space_idx + 1, std::string::npos);
+    std::size_t space_idx2 = line.find(" ", space_idx + 1);
+    std::string path_cnt_str = line.substr(space_idx + 1, space_idx2);
+    std::string targ_line = line.substr(space_idx2 + 1, std::string::npos);
     int score = stoi(score_str);
+    unsigned long long path_cnt = stoull(path_cnt_str);
     dfg_node_map[targ_line] = std::make_pair(idx++, (unsigned int) score);
+    dfg_path_map[targ_line] = path_cnt;
     if (idx >= DFG_MAP_SIZE) {
       std::cout << "Input DFG is too large (check DFG_MAP_SIZE)" << std::endl;
       exit(1);
@@ -136,6 +141,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   IntegerType *Int8Ty  = IntegerType::getInt8Ty(C);
   IntegerType *Int32Ty = IntegerType::getInt32Ty(C);
+  IntegerType *Int64Ty = IntegerType::getInt64Ty(C);
 
   initialize();
 
@@ -204,6 +210,7 @@ bool AFLCoverage::runOnModule(Module &M) {
       bool is_dfg_node = false;
       unsigned int node_idx = 0;
       unsigned int node_score = 0;
+      unsigned long long path_cnt = 0;
 
       if (is_inst_targ) {
         inst_blocks++;
@@ -228,8 +235,10 @@ bool AFLCoverage::runOnModule(Module &M) {
             if (dfg_node_map.count(targ_str) > 0) {
               is_dfg_node = true;
               auto node_info = dfg_node_map[targ_str];
+              auto path_info = dfg_path_map[targ_str];
               node_idx = node_info.first;
               node_score = node_info.second;
+              path_cnt = path_info;
               inst_dfg_nodes++;
               break;
             }
@@ -276,11 +285,16 @@ bool AFLCoverage::runOnModule(Module &M) {
       if (is_dfg_node) {
         /* Update DFG coverage map. */
         LoadInst *DFGMap = IRB.CreateLoad(AFLMapDFGPtr);
+        LoadInst *DFGCntMap = IRB.CreateLoad(AFLMapDFGPtr);
         DFGMap->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
         ConstantInt * Idx = ConstantInt::get(Int32Ty, node_idx);
         ConstantInt * Score = ConstantInt::get(Int32Ty, node_score);
+        ConstantInt * PathCnt = ConstantInt::get(Int64Ty, path_cnt);
         Value *DFGMapPtrIdx = IRB.CreateGEP(DFGMap, Idx);
+        Value *DFGCntMapPtrIdx = IRB.CreateGEP(DFGCntMap, Idx);
         IRB.CreateStore(Score, DFGMapPtrIdx)
+            ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+        IRB.CreateStore(PathCnt, DFGCntMapPtrIdx)
             ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       }
     }

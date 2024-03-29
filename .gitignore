@@ -1,3 +1,5 @@
+.DS_Store
+
 # Binaries produced by "make".
 afl-analyze
 afl-as

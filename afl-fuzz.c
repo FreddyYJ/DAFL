@@ -150,6 +150,9 @@ static s32 forksrv_pid,               /* PID of the fork server           */
 EXP_ST u8* trace_bits;                /* SHM with code coverage bitmap    */
 EXP_ST u32* dfg_bits;                 /* SHM with DFG coverage bitmap     */
 EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
+EXP_ST u64* dfg_counts;                /* SHM with DFG path count          */
+
+EXP_ST u64 dfg_node_count[DFG_MAP_SIZE];  /* Node counts for DFG              */
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -159,6 +162,7 @@ static u8  var_bytes[MAP_SIZE];       /* Bytes that appear to be variable */
 
 static s32 shm_id;                    /* ID of the SHM for code coverage  */
 static s32 shm_id_dfg;                /* ID of the SHM for DFG coverage   */
+static s32 shm_id_dfg_count;          /* ID of the SHM for DFG path count      */
 
 static volatile u8 stop_soon,         /* Ctrl-C pressed?                  */
                    clear_screen = 1,  /* Window resized?                  */
@@ -1599,6 +1603,7 @@ static void remove_shm(void) {
 
   shmctl(shm_id, IPC_RMID, NULL);
   shmctl(shm_id_dfg, IPC_RMID, NULL);
+  shmctl(shm_id_dfg_count, IPC_RMID, NULL);
 
 }
 
@@ -1749,6 +1754,7 @@ EXP_ST void setup_shm(void) {
 
   u8* shm_str;
   u8* shm_str_dfg;
+  u8* shm_str_dfg_count;
 
   if (!in_bitmap) memset(virgin_bits, 255, MAP_SIZE);
 
@@ -1758,6 +1764,8 @@ EXP_ST void setup_shm(void) {
   shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
   shm_id_dfg = shmget(IPC_PRIVATE, sizeof(u32) * DFG_MAP_SIZE,
                       IPC_CREAT | IPC_EXCL | 0600);
+  shm_id_dfg_count = shmget(IPC_PRIVATE, sizeof(u64) * DFG_MAP_SIZE,
+                            IPC_CREAT | IPC_EXCL | 0600);
 
   if (shm_id < 0) PFATAL("shmget() failed");
 
@@ -1765,6 +1773,7 @@ EXP_ST void setup_shm(void) {
 
   shm_str = alloc_printf("%d", shm_id);
   shm_str_dfg = alloc_printf("%d", shm_id_dfg);
+  shm_str_dfg_count = alloc_printf("%d", shm_id_dfg_count);
 
   /* If somebody is asking us to fuzz instrumented binaries in dumb mode,
      we don't want them to detect instrumentation, since we won't be sending
@@ -1773,15 +1782,19 @@ EXP_ST void setup_shm(void) {
 
   if (!dumb_mode) setenv(SHM_ENV_VAR, shm_str, 1);
   if (!dumb_mode) setenv(SHM_ENV_VAR_DFG, shm_str_dfg, 1);
+  if (!dumb_mode) setenv(SHM_ENV_VAR_DFG_COUNT, shm_str_dfg_count, 1);
 
   ck_free(shm_str);
   ck_free(shm_str_dfg);
+  ck_free(shm_str_dfg_count);
 
   trace_bits = shmat(shm_id, NULL, 0);
   dfg_bits = shmat(shm_id_dfg, NULL, 0);
+  dfg_counts = shmat(shm_id_dfg_count, NULL, 0);
 
   if (trace_bits == (void *)-1) PFATAL("shmat() failed");
   if (dfg_bits == (void *)-1) PFATAL("shmat() failed");
+  if (dfg_counts == (void *)-1) PFATAL("shmat() failed");
 
 }
 
@@ -2674,7 +2687,7 @@ EXP_ST void init_forkserver(char** argv) {
 /* Execute target application, monitoring for timeouts. Return status
    information. The called program will update trace_bits[]. */
 
-static u8 run_target(char** argv, u32 timeout, char* target_path_p, char* env_opt) {
+static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode) {
 
   static struct itimerval it;
   static u32 prev_timed_out = 0;
@@ -2691,6 +2704,7 @@ static u8 run_target(char** argv, u32 timeout, char* target_path_p, char* env_op
 
   memset(trace_bits, 0, MAP_SIZE);
   memset(dfg_bits, 0, sizeof(u32) * DFG_MAP_SIZE);
+  memset(dfg_counts, 0, sizeof(u64) * DFG_MAP_SIZE);
   MEM_BARRIER();
 
   /* If we're running in "dumb" mode, we can't rely on the fork server
@@ -2698,7 +2712,7 @@ static u8 run_target(char** argv, u32 timeout, char* target_path_p, char* env_op
      execve(). There is a bit of code duplication between here and
      init_forkserver(), but c'est la vie. */
 
-  if (dumb_mode == 1 || no_forkserver) {
+  if (force_dumb_mode == 1 || dumb_mode == 1 || no_forkserver) {
 
     child_pid = fork();
 
@@ -2764,7 +2778,7 @@ static u8 run_target(char** argv, u32 timeout, char* target_path_p, char* env_op
           0
       };
 
-      execve(target_path_p, argv, envp);
+      execve(argv[0], argv, envp);
 
       /* Use a distinctive bitmap value to tell the parent about execv()
          falling through. */
@@ -2808,7 +2822,7 @@ static u8 run_target(char** argv, u32 timeout, char* target_path_p, char* env_op
 
   /* The SIGALRM handler simply kills the child_pid and sets child_timed_out. */
 
-  if (dumb_mode == 1 || no_forkserver) {
+  if (force_dumb_mode == 1 || dumb_mode == 1 || no_forkserver) {
 
     if (waitpid(child_pid, &status, 0) <= 0) PFATAL("waitpid() failed");
 
@@ -2874,7 +2888,7 @@ static u8 run_target(char** argv, u32 timeout, char* target_path_p, char* env_op
     return FAULT_CRASH;
   }
 
-  if ((dumb_mode == 1 || no_forkserver) && tb4 == EXEC_FAIL_SIG)
+  if ((force_dumb_mode == 1 || dumb_mode == 1 || no_forkserver) && tb4 == EXEC_FAIL_SIG)
     return FAULT_ERROR;
 
   /* It makes sense to account for the slowest units only if the testcase was run
@@ -3006,7 +3020,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
 
     write_to_testcase(use_mem, q->len);
 
-    fault = run_target(argv, use_tmout, target_path, "USELESS=0");
+    fault = run_target(argv, use_tmout, "USELESS=0", 0);
 
     /* stop_soon is set by the handler for Ctrl+C. When it's pressed,
        we want to bail out quickly. */
@@ -3557,7 +3571,8 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *tmpfile = "";
   u8 *tmpfile_env = "";
   u8 *cmd = "";
-  u8 *covered = "";
+  u8 covered[100] = "";
+  u8 *tmp_argv1 = "";
 
   u8 fault_tmp;
   u32 line = 0;
@@ -3576,11 +3591,14 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   // Remove covdir + "/__tmp_file" (It might not exist, but that's okay)
   unlink(tmpfile);
   write_to_testcase(mem, len);
-  fault_tmp = run_target(argv, 10000, covexe, tmpfile_env);
+  tmp_argv1 = argv[0];
+  argv[0] = covexe;
+  fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
+  argv[0] = tmp_argv1;
 
-  if (access(tmpfile, F_OK) != 0) FATAL("Cannot access tmpfile!");
+  if (access(tmpfile, F_OK) == -1) return 0;
 
-  if (crashed) {
+  if (crashed == 1) {
     // Read last line of covdir + "/__tmp_file" with tail -n 1 command
     cmd = alloc_printf("tail -n 1 %s", tmpfile);
     FILE *fp = popen(cmd, "r");
@@ -3613,6 +3631,7 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *tmpfile_env = "";
   u8 *cmd = "";
   u8 fault_tmp;
+  u8 *tmp_argv1 = "";
   u32 num = 1 + UR(ARITH_MAX);
 
   if(!getenv("PACFIX_VAL_EXE")) return;
@@ -3625,11 +3644,14 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   // Remove covdir + "/__tmp_file" (It might not exist, but that's okay)
   unlink(tmpfile);
   write_to_testcase(mem, len);
-  fault_tmp = run_target(argv, 10000, valexe, tmpfile_env);
+  tmp_argv1 = argv[0];
+  argv[0] = valexe;
+  fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
+  argv[0] = tmp_argv1;
 
-  if (access(tmpfile, F_OK) != 0) FATAL("Cannot access tmpfile!");
+  if (access(tmpfile, F_OK) != 0) return;
 
-  if (crashed) {
+  if (crashed == 1) {
      cmd = alloc_printf("mv %s %s/memory/neg/id:%06llu", tmpfile, out_dir, total_saved_crashes);
      total_saved_crashes++;
   }
@@ -3743,7 +3765,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
         u8 new_fault;
         write_to_testcase(mem, len);
-        new_fault = run_target(argv, hang_tmout, target_path, "USELESS=0");
+        new_fault = run_target(argv, hang_tmout, "USELESS=0", 0);
 
         /* A corner case that one user reported bumping into: increasing the
            timeout actually uncovers a crash. Make sure we don't discard it if
@@ -5059,7 +5081,7 @@ static u8 trim_case(char** argv, struct queue_entry* q, u8* in_buf) {
 
       write_with_gap(in_buf, q->len, remove_pos, trim_avail);
 
-      fault = run_target(argv, exec_tmout, target_path, "USELESS=0");
+      fault = run_target(argv, exec_tmout, "USELESS=0", 0);
       trim_execs++;
 
       if (stop_soon || fault == FAULT_ERROR) goto abort_trimming;
@@ -5152,7 +5174,7 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   write_to_testcase(out_buf, len);
 
-  fault = run_target(argv, exec_tmout, target_path, "USELESS=0");
+  fault = run_target(argv, exec_tmout, "USELESS=0", 0);
 
   if (stop_soon) return 1;
 
@@ -7329,7 +7351,7 @@ static void sync_fuzzers(char** argv) {
 
         write_to_testcase(mem, st.st_size);
 
-        fault = run_target(argv, exec_tmout, target_path, "USELESS=0");
+        fault = run_target(argv, exec_tmout, "USELESS=0", 0);
 
         if (stop_soon) return;
 

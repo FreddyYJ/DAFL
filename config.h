@@ -278,6 +278,7 @@
 
 #define SHM_ENV_VAR         "__AFL_SHM_ID"
 #define SHM_ENV_VAR_DFG     "__AFL_SHM_ID_DFG"
+#define SHM_ENV_VAR_DFG_COUNT "__AFL_SHM_ID_DFG_COUNT"
 
 /* Other less interesting, internal-only variables. */
 
