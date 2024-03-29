@@ -42,6 +42,7 @@
 #include "debug.h"
 #include "alloc-inl.h"
 #include "hash.h"
+#include "afl-fuzz.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -153,6 +154,8 @@ EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
 EXP_ST u64* dfg_counts;                /* SHM with DFG path count          */
 
 EXP_ST u64 dfg_node_count[DFG_MAP_SIZE];  /* Node counts for DFG              */
+EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
+EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -255,50 +258,20 @@ static u32 max_queue_size = 4096;          /* Maximum input in queue            
 static u32 unique_dafl_input = 0;     /* Number of unique input with new coverage on def-use graph */
 static FILE* unique_dafl_log_file = NULL; /* File to record unique input with new coverage on def-use graph */
 
-struct proximity_score {
-  u64 original;
-  double adjusted;
-  u32 covered;
-  u32 *dfg_count_map; // Sparse map: [count]
-  u32 *dfg_dense_map; // Dense map: [index, count]
-};
-
-struct queue_entry {
-
-  u8* fname;                          /* File name for the test case      */
-  u32 len;                            /* Input length                     */
-
-  u8  cal_failed,                     /* Calibration failed?              */
-      trim_done,                      /* Trimmed?                         */
-      was_fuzzed,                     /* Had any fuzzing done yet?        */
-      handled_in_cycle,               /* Was handled in current cycle?    */
-      passed_det,                     /* Deterministic stages passed?     */
-      has_new_cov,                    /* Triggers new coverage?           */
-      var_behavior,                   /* Variable behavior?               */
-      favored,                        /* Currently favored?               */
-      fs_redundant,                   /* Marked as redundant in the fs?   */
-      removed;                        /* Removed from queue?              */
-
-  u32 bitmap_size,                    /* Number of bits set in bitmap     */
-      exec_cksum;                     /* Checksum of the execution trace  */
-
-  struct proximity_score prox_score;  /* Proximity score of the test case */
-  u32 entry_id;                       /* The ID assigned to the test case */
-
-  u64 exec_us,                        /* Execution time (us)              */
-      handicap,                       /* Number of queue cycles behind    */
-      depth;                          /* Path depth                       */
-
-  u8* trace_mini;                     /* Trace bytes, if kept             */
-  u32 tc_ref;                         /* Trace bytes ref count            */
-
-  struct queue_entry *next;           /* Next element, if any             */
-
-};
-
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
                           *queue_cur, /* Current offset within the queue  */
                           *queue_last;/* Lastly added to the queue        */
+
+static struct queue_entry *pareto_frontier_queue;
+static struct queue_entry *newly_added_queue;
+static struct queue_entry *recycled_queue;
+static struct queue_entry *dominated_queue;
+
+static s32 queue_rank = -1;           /* Rank of the queue entry           */
+static u8 use_moo_scheduler = 1;      /* Scheduling mode                  */
+static u32 moo_cycle = 0;             /* Current moo cycle                */
+static u8 use_dafl_coverage = 0;      /* Use dfg_bits for checking unique path */
+
 static struct queue_entry*
   first_unhandled;                    /* 1st unhandled item in the queue  */
 
@@ -323,7 +296,10 @@ static u32 a_extras_cnt;              /* Total number of tokens available */
 static struct proximity_score max_prox_score;        /* Maximum score of the seed queue  */
 static struct proximity_score min_prox_score; /* Minimum score of the seed queue  */
 static struct proximity_score total_prox_score; /* Sum of proximity scores          */
-static struct proximity_score avg_prox_score;                                                                            /* Average of proximity scores      */
+static struct proximity_score avg_prox_score; /* Average of proximity scores      */
+
+static struct hashmap *dfg_hashmap;     /* Hashmap for DFG coverage         */
+
 static u32 no_dfg_schedule = 0;      /* No DFG-based seed scheduling     */
 static u32 t_x = 0;                   /* To test AFLGo's scheduling       */
 
@@ -880,6 +856,13 @@ static void sorted_insert_to_queue(struct queue_entry* q) {
 
 }
 
+static void moo_insert_to_queue(struct queue_entry *q) {
+  q->next_moo = newly_added_queue;
+  newly_added_queue = q;
+  q->next = queue;
+  queue = q;
+}
+
 /* Append new test case to the queue. */
 
 static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_score *prox_score) {
@@ -892,10 +875,12 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   q->passed_det   = passed_det;
   q->prox_score   = *prox_score;
   q->entry_id     = queued_paths;
+  q->rank         = queue_rank + 1;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
-  sorted_insert_to_queue(q);
+  if (use_moo_scheduler) moo_insert_to_queue(q);
+  else sorted_insert_to_queue(q);
 
   queue_last = q;
   queued_paths++;
@@ -1178,7 +1163,31 @@ static u32 count_non_255_bytes(u8* mem) {
 
 }
 
+static u8 check_covered_target() {
+  if (dfg_target_idx < DFG_MAP_SIZE)
+    return dfg_bits[dfg_target_idx] != 0;
+  return 0;
+}
+
 static void update_dfg_count_map(struct queue_entry *q) {
+
+  if (use_moo_scheduler && q && check_covered_target()) {
+
+    if (!q->dfg_cksum) {
+      q->dfg_cksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+    }
+    u32 checksum = q->dfg_cksum;
+    struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
+    if (!kvp) {
+      // Unique: update the hashmap, dfg_count_map
+      hashmap_insert(dfg_hashmap, checksum, q);
+    } else if (!kvp->value) {
+      // Already handled in check_unique_path()
+      kvp->value = q;
+    }
+    return;
+
+  }
 
   u32 i = DFG_MAP_SIZE;
   u8 is_unique = 0;
@@ -1192,6 +1201,8 @@ static void update_dfg_count_map(struct queue_entry *q) {
     }
   
   }
+
+  if (!q) return;
 
   if (is_unique) {
     unique_dafl_input++;
@@ -1283,7 +1294,15 @@ static void compute_proximity_score(struct proximity_score *prox_score, u32 *dfg
     covered++;
     orig_score += score;
     u32 c = dfg_count_map[i];
-    adjusted_score += compute_reduced_score(score, c);
+    if (use_moo_scheduler) {
+      u32 max_paths = dfg_node_info_map[i].max_paths;
+      if (c > max_paths) {
+        c = max_paths;
+      }
+      adjusted_score += (max_paths - c);
+    } else {
+      adjusted_score += compute_reduced_score(score, c);
+    }
   }
 
   prox_score->original = orig_score;
@@ -1305,7 +1324,15 @@ static u8 recompute_proximity_score(struct queue_entry* q) {
       u32 index = q->prox_score.dfg_dense_map[i * 2];
       u32 score = q->prox_score.dfg_dense_map[i * 2 + 1];
       u32 count = dfg_count_map[index];
-      adjusted_score += compute_reduced_score(score, count);
+      if (use_moo_scheduler) {
+        u32 max_paths = dfg_node_info_map[index].max_paths;
+        if (count > max_paths) {
+          count = max_paths;
+        }
+        adjusted_score += (max_paths - count);
+      } else {
+        adjusted_score += compute_reduced_score(score, count);
+      }
     }
     q->prox_score.adjusted = adjusted_score;
     return 0;
@@ -1328,6 +1355,47 @@ static void init_global_prox_score() {
   total_prox_score.adjusted = .0;
   avg_prox_score.original = .0;
   avg_prox_score.adjusted = .0;
+}
+
+static void init_dfg(u8* dfg_node_info_file) {
+
+  dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
+  dfg_hashmap = hashmap_create(max_queue_size);
+  if (!dfg_node_info_file) {
+    if (use_moo_scheduler) {
+      PFATAL("dfg_node_info_file (-p option) is required for MOO scheduler");
+    } else {
+      return;
+    }
+  }
+
+  FILE *file = fopen(dfg_node_info_file, "r");
+  if (!file) {
+    if (use_moo_scheduler)
+      PFATAL("Unable to open '%s'", dfg_node_info_file);
+    else
+      return;
+  }
+
+  dfg_node_info_map = ck_alloc(DFG_MAP_SIZE * sizeof(struct dfg_node_info));
+  u32 idx = 0, max_score = 0;
+  u32 score, max_paths;
+  u8 node_name[256];
+  // Read the score and max_paths
+  while(fscanf(file, "%d %d %255s", &score, &max_paths, node_name) == 3) {
+    // Insert to dfg_node_info_map
+    struct dfg_node_info *node_info = &dfg_node_info_map[idx];
+    node_info->idx = idx;
+    node_info->score = score;
+    node_info->max_paths = max_paths;
+    if (score > max_score) {
+      max_score = score;
+      dfg_target_idx = idx;
+    }
+    idx++;
+  }
+  fclose(file);
+
 }
 
 static void update_global_prox_score(struct proximity_score *prox_score) {
@@ -1357,6 +1425,9 @@ static void update_dfg_score(struct queue_entry *q_preserve) {
    * Update [min|max|total|avg]_prox_score
    * Keep the queue size under the limit
   */
+  if (use_moo_scheduler) {
+    return;
+  }
   u64 start_time = get_cur_time();
   init_global_prox_score();
   memset(shortcut_per_100, 0, 1024 * sizeof(struct queue_entry*));
@@ -1747,6 +1818,114 @@ static void cull_queue(void) {
 
 }
 
+static s32 check_domiance(struct proximity_score *a, struct proximity_score *b) {
+  // Compare two entries based on the proximity score domination
+  // Return 1 if a > b, -1 if a < b
+  if (a->original > b->original && a->adjusted > b->adjusted) {
+    return 1;
+  } else if (a->original < b->original && a->adjusted < b->adjusted) {
+    return -1;
+  }
+  return 0;
+}
+
+static void update_ranks(struct queue_entry *a, struct queue_entry *b) {
+  struct proximity_score *prox_score_a = &a->prox_score;
+  struct proximity_score *prox_score_b = &b->prox_score;
+  // Compare two entries based on the proximity score domination
+  s32 dominance = check_domiance(prox_score_a, prox_score_b);
+  if (dominance > 0) {
+    a->rank++;
+  } else if (dominance < 0) {
+    b->rank++;
+  }
+}
+
+static struct queue_entry* select_next_entry() {
+
+  struct queue_entry* q = NULL;
+  if (!use_moo_scheduler) {
+    // Use the default scheduler
+    q = queue_cur;
+    if (first_unhandled) { // This is set only when a new item was added.
+      q = first_unhandled;
+      first_unhandled = NULL;
+    } else { // Proceed to the next unhandled item in the queue.
+      while (q && q->handled_in_cycle) {
+        q = q->next;
+      }
+    }
+    if (!q)
+      fprintf(unique_dafl_log_file, "[sche] [defa] [id %u] [handled %u]\n", q->entry_id, q->handled_in_cycle);
+    return q;
+  }
+
+  // Use the MOO scheduler
+  if (!pareto_frontier_queue) {
+    // If the pareto frontier queue is empty, select from the dominated queue
+    // First, update the dominated queue with the new entries
+    moo_cycle++;
+    struct vector *new_entries = list_to_vector(newly_added_queue);
+    q = vector_get(new_entries, vector_size(new_entries) - 1);
+    if (q) {
+      q->next_moo = dominated_queue;
+      dominated_queue = vector_get(new_entries, 0);
+      newly_added_queue = NULL;
+    }
+    q = dominated_queue;
+    for (u32 i = 0; i < vector_size(new_entries); i++) {
+      while (q) {
+        update_ranks(q, vector_get(new_entries, i));
+        q = q->next_moo;
+      }
+    }
+    vector_free(new_entries);
+    // If the dominated queue is empty, select from the recycled queue
+    if (!dominated_queue) {
+      queue_rank = -1;
+      q = recycled_queue;
+      while (q) {
+        q->rank = 0;
+        q = q->next_moo;
+      }
+      dominated_queue = recycled_queue;
+      q = dominated_queue;
+      struct queue_entry *q_next = q;
+      recycled_queue = NULL;
+      while (q) {
+        update_ranks(q, q_next);
+      }
+    }
+    queue_rank++;
+    q = NULL;
+    struct vector *ranked_vec = list_to_vector(dominated_queue);
+    for (u32 i = 0; i < vector_size(ranked_vec); i++) {
+      struct queue_entry *entry = vector_get(ranked_vec, i);
+      if (entry->rank == queue_rank) {
+        if (q) {
+          q->next_moo = entry;
+        } else {
+          pareto_frontier_queue = entry;
+        }
+        q = entry;
+        q->next_moo = NULL;
+        vector_set(ranked_vec, i, NULL);
+      }
+    }
+    dominated_queue = vector_to_list(ranked_vec);
+    vector_free(ranked_vec);
+  }
+  // Pop from pareto_frontier_queue, push to recycled_queue
+  q = pareto_frontier_queue;
+  pareto_frontier_queue = q->next_moo;
+  q->next_moo = recycled_queue;
+  recycled_queue = q;
+  if (!q)
+    fprintf(unique_dafl_log_file, "[sche] [moo] [id %u] [rank %d] [cycle %u]\n", q->entry_id, q->rank, moo_cycle);
+
+  return q;
+
+}
 
 /* Configure shared memory and virgin_bits. This is called at startup. */
 
@@ -3665,6 +3844,22 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   pclose(fp);
 }
 
+static u8 check_unique_path() {
+  if (!check_covered_target()) return 0;
+  // q->trace_mini = ck_alloc(MAP_SIZE >> 3);
+  // minimize_bits(q->trace_mini, trace_bits);
+  u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+  struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
+  if (!kvp) {
+    if (not_on_tty) {
+      ACTF("Found unique path %u, checksum %u", queued_paths, checksum);
+    }
+    hashmap_insert(dfg_hashmap, checksum, NULL);
+    update_dfg_count_map(NULL);
+    return 1;
+  }
+  return 0;
+}
 
 /* Check if the result of an execve() during routine fuzzing is interesting,
    save or queue the input test case for further analysis if so. Returns 1 if
@@ -3676,9 +3871,14 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8  hnb;
   s32 fd;
   u8  keeping = 0, res;
+  u8 has_valid_unique_path = 0;
   struct proximity_score prox_score;
 
-  if (fault == crash_mode) {
+  if (dfg_node_info_map) {
+    has_valid_unique_path = check_unique_path();
+  }
+
+  if ((fault == crash_mode) || (use_moo_scheduler && has_valid_unique_path)) {
 
     hnb = has_new_bits(virgin_bits);
     if (hnb) {
@@ -3691,7 +3891,17 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     //   return 0;
     // }
       compute_proximity_score(&prox_score, dfg_bits, 0);
-
+      if (not_on_tty) {
+        ACTF("[new-q] [id %u] [moo-id %u] [uniq %u] [cov %u] [prox %llu] [adj %f]",
+             queued_paths, hashmap_size(dfg_hashmap), has_valid_unique_path, prox_score.covered, prox_score.original, prox_score.adjusted);
+      }
+      if (has_valid_unique_path) {
+          fprintf(unique_dafl_log_file, "[moo] [uniq] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f]\n",
+                  queued_paths, hashmap_size(dfg_hashmap), prox_score.covered, prox_score.original, prox_score.adjusted);
+      } else {
+          fprintf(unique_dafl_log_file, "[moo] [no-uniq] [id %u] [cov %u] [prox %llu] [adj %f] [tgt %u]\n",
+                  queued_paths, prox_score.covered, prox_score.original, prox_score.adjusted, check_covered_target());
+      }
 #ifndef SIMPLE_FILES
 
       fn = alloc_printf("%s/queue/id:%06u,%llu,%s", out_dir, queued_paths,
@@ -3711,6 +3921,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       }
 
       queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
+      queue_last->dfg_cksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
@@ -3726,6 +3937,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       close(fd);
 
       keeping = 1;
+    } else if (has_valid_unique_path) {
+      if (not_on_tty)
+        ACTF("[moo] [skip-q] [id %u] [moo-id %u] [uniq %u] no new bits", queued_paths, hashmap_size(dfg_hashmap), has_valid_unique_path);
+      fprintf(unique_dafl_log_file, "[moo] [uniq-skip] [id %u] [moo-id %u]\n", queued_paths, hashmap_size(dfg_hashmap));
     }
 
   }
@@ -3857,7 +4072,7 @@ keep_as_crash:
 #ifndef SIMPLE_FILES
 
       fn = alloc_printf("%s/normals/id:%06llu,%llu,sig:%02u,%s", out_dir,
-                        total_normals, prox_score, kill_signal,
+                        total_normals, prox_score.original, kill_signal,
                         describe_op(0));
 
 #else
@@ -3876,7 +4091,10 @@ keep_as_crash:
 
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
-
+  if (has_valid_unique_path) {
+    fprintf(unique_dafl_log_file, "[moo] [save] [id %u] [moo-id %u] [fault %u] [file %s]\n",
+            queued_paths, hashmap_size(dfg_hashmap), fault, fn);
+  }
   fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0) PFATAL("Unable to create '%s'", fn);
   ck_write(fd, mem, len, fn);
@@ -8362,6 +8580,7 @@ int main(int argc, char** argv) {
   u64 prev_queued = 0;
   u32 sync_interval_cnt = 0;
   u8  *extras_dir = 0;
+  u8  *dfg_node_info_file = 0;
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
   char** use_argv;
@@ -8376,7 +8595,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:")) > 0)
 
     switch (opt) {
 
@@ -8576,9 +8795,22 @@ int main(int argc, char** argv) {
         proximity_score_allowance = atoi(optarg);
         break;
 
-      default:
+    case 's':    /* Parameter to set scheduler */
+      if (optarg[0] == 'm')
+        use_moo_scheduler = 1;
+      else if (optarg[0] == 'd')
+        use_moo_scheduler = 0;
+      else
+        use_moo_scheduler = 1;
+      break;
 
-        usage(argv[0]);
+    case 'p':    /* Set dfg_node_info_file */
+      dfg_node_info_file = optarg;
+      break;
+
+    default:
+
+      usage(argv[0]);
 
     }
 
@@ -8640,7 +8872,7 @@ int main(int argc, char** argv) {
   setup_shm();
   init_count_class16();
   init_global_prox_score();
-  dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
+  init_dfg(dfg_node_info_file);
 
   setup_dirs_fds();
   read_testcases();
@@ -8741,13 +8973,8 @@ int main(int argc, char** argv) {
 
     if (stop_soon) break;
 
-    if (first_unhandled) { // This is set only when a new item was added.
-      queue_cur = first_unhandled;
-      first_unhandled = NULL;
-    } else { // Proceed to the next unhandled item in the queue.
-      while (queue_cur && queue_cur->handled_in_cycle)
-        queue_cur = queue_cur->next;
-    }
+    queue_cur = select_next_entry();
+
   }
 
   if (queue_cur) show_stats();
@@ -8786,6 +9013,7 @@ stop_fuzzing:
   fclose(unique_dafl_log_file);
   destroy_queue();
   destroy_extras();
+  hashmap_free(dfg_hashmap);
   ck_free(target_path);
   ck_free(sync_id);
   ck_free(dfg_count_map);
