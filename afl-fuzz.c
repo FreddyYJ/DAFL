@@ -1250,7 +1250,7 @@ static double compute_reduced_score(u32 score, u32 count) {
     for (u32 i = 0; i < max_queue_size; i++) {
       proximity_score_cache[i] = value;
       // score * (1 - proximity_score_reduction) ^ count
-      if (proximity_score_allowance < 0) {
+      if (proximity_score_allowance <= 0) {
         value *= factor;
       } else {
         // If count is less than or equal to proximity_score_allowance,
@@ -1294,7 +1294,8 @@ static void compute_proximity_score(struct proximity_score *prox_score, u32 *dfg
     covered++;
     orig_score += score;
     u32 c = dfg_count_map[i];
-    if (use_moo_scheduler) {
+    if (use_moo_scheduler && proximity_score_allowance < 0) {
+      // if -k option is not used, the score will be max_paths - count
       u32 max_paths = dfg_node_info_map[i].max_paths;
       if (c > max_paths) {
         c = max_paths;
