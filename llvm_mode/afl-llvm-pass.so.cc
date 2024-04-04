@@ -286,16 +286,12 @@ bool AFLCoverage::runOnModule(Module &M) {
       if (is_dfg_node) {
         /* Update DFG coverage map. */
         LoadInst *DFGMap = IRB.CreateLoad(AFLMapDFGPtr);
-        LoadInst *DFGCntMap = IRB.CreateLoad(AFLMapDFGPtr);
         DFGMap->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
         ConstantInt * Idx = ConstantInt::get(Int32Ty, node_idx);
         ConstantInt * Score = ConstantInt::get(Int32Ty, node_score);
         ConstantInt * PathCnt = ConstantInt::get(Int64Ty, path_cnt);
         Value *DFGMapPtrIdx = IRB.CreateGEP(DFGMap, Idx);
-        Value *DFGCntMapPtrIdx = IRB.CreateGEP(DFGCntMap, Idx);
         IRB.CreateStore(Score, DFGMapPtrIdx)
-            ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-        IRB.CreateStore(PathCnt, DFGCntMapPtrIdx)
             ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       }
     }

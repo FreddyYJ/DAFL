@@ -151,7 +151,6 @@ static s32 forksrv_pid,               /* PID of the fork server           */
 EXP_ST u8* trace_bits;                /* SHM with code coverage bitmap    */
 EXP_ST u32* dfg_bits;                 /* SHM with DFG coverage bitmap     */
 EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
-EXP_ST u64* dfg_counts;                /* SHM with DFG path count          */
 
 EXP_ST u64 dfg_node_count[DFG_MAP_SIZE];  /* Node counts for DFG              */
 EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
@@ -1294,6 +1293,7 @@ static void compute_proximity_score(struct proximity_score *prox_score, u32 *dfg
     covered++;
     orig_score += score;
     u32 c = dfg_count_map[i];
+    ACTF("[dfg] [id %u] [idx %u] [score %u] [count %u]", queued_paths, i, score, c);
     if (use_moo_scheduler && proximity_score_allowance < 0) {
       // if -k option is not used, the score will be max_paths - count
       u32 max_paths = dfg_node_info_map[i].max_paths;
@@ -1362,6 +1362,7 @@ static void init_dfg(u8* dfg_node_info_file) {
 
   dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
   dfg_hashmap = hashmap_create(max_queue_size);
+
   if (!dfg_node_info_file) {
     if (use_moo_scheduler) {
       PFATAL("dfg_node_info_file (-p option) is required for MOO scheduler");
@@ -1396,7 +1397,8 @@ static void init_dfg(u8* dfg_node_info_file) {
     idx++;
   }
   fclose(file);
-
+  ACTF("Check dfg_node_info_map target: %u, max_score: %u vs idx %u, score %u", dfg_target_idx, max_score,
+       dfg_node_info_map[dfg_target_idx].idx, dfg_node_info_map[dfg_target_idx].score);
 }
 
 static void update_global_prox_score(struct proximity_score *prox_score) {
@@ -1970,11 +1972,9 @@ EXP_ST void setup_shm(void) {
 
   trace_bits = shmat(shm_id, NULL, 0);
   dfg_bits = shmat(shm_id_dfg, NULL, 0);
-  dfg_counts = shmat(shm_id_dfg_count, NULL, 0);
 
   if (trace_bits == (void *)-1) PFATAL("shmat() failed");
   if (dfg_bits == (void *)-1) PFATAL("shmat() failed");
-  if (dfg_counts == (void *)-1) PFATAL("shmat() failed");
 
 }
 
@@ -2884,7 +2884,6 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
 
   memset(trace_bits, 0, MAP_SIZE);
   memset(dfg_bits, 0, sizeof(u32) * DFG_MAP_SIZE);
-  memset(dfg_counts, 0, sizeof(u64) * DFG_MAP_SIZE);
   MEM_BARRIER();
 
   /* If we're running in "dumb" mode, we can't rely on the fork server
