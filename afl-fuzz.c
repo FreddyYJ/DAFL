@@ -1865,6 +1865,14 @@ static struct queue_entry* select_next_entry() {
   // Use the MOO scheduler
   if (!pareto_frontier_queue) {
     // If the pareto frontier queue is empty, select from the dominated queue
+    // First, update the adjusted score
+    if (proximity_score_allowance >= 0) {
+      struct queue_entry *q = queue;
+      while (q) {
+        recompute_proximity_score(q);
+        q = q->next;
+      }
+    }
     // First, update the dominated queue with the new entries
     moo_cycle++;
     struct vector *new_entries = list_to_vector(newly_added_queue);
