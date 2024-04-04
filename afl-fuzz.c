@@ -1293,7 +1293,6 @@ static void compute_proximity_score(struct proximity_score *prox_score, u32 *dfg
     covered++;
     orig_score += score;
     u32 c = dfg_count_map[i];
-    ACTF("[dfg] [id %u] [idx %u] [score %u] [count %u]", queued_paths, i, score, c);
     if (use_moo_scheduler && proximity_score_allowance < 0) {
       // if -k option is not used, the score will be max_paths - count
       u32 max_paths = dfg_node_info_map[i].max_paths;
