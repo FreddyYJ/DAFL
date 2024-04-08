@@ -3782,7 +3782,11 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
   argv[0] = tmp_argv1;
 
+  ACTF("[pacfix] checking coverage for line %d %s", line, tmpfile);
+
   if (access(tmpfile, F_OK) == -1) return 0;
+
+  ACTF("[pacfix] [tmp] [crash %d] [tf %s]", crashed, tmpfile);
 
   if (crashed == 1) {
     // Read last line of covdir + "/__tmp_file" with tail -n 1 command
@@ -4099,13 +4103,14 @@ keep_as_crash:
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
   if (has_valid_unique_path) {
-    fprintf(unique_dafl_log_file, "[moo] [save] [id %u] [moo-id %u] [fault %u] [file %s]\n",
-            queued_paths, hashmap_size(dfg_hashmap), fault, fn);
+    fprintf(unique_dafl_log_file, "[moo] [save] [id %u] [moo-id %u] [fault %u] [file %s] [time %llu]\n",
+            queued_paths, hashmap_size(dfg_hashmap), fault, fn, get_cur_time() - start_time);
+    fflush(unique_dafl_log_file);
+    fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) PFATAL("Unable to create '%s'", fn);
+    ck_write(fd, mem, len, fn);
+    close(fd);
   }
-  fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
-  if (fd < 0) PFATAL("Unable to create '%s'", fn);
-  ck_write(fd, mem, len, fn);
-  close(fd);
 
   ck_free(fn);
 
