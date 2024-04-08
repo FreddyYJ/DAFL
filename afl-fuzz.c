@@ -4617,6 +4617,30 @@ static void maybe_delete_out_dir(void) {
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
   ck_free(fn);
 
+  fn = alloc_printf("%s/normals", out_dir);
+  if (in_place_resume && rmdir(fn)) {
+
+    time_t cur_t = time(0);
+    struct tm* t = localtime(&cur_t);
+#ifndef SIMPLE_FILES
+    u8* nfn = alloc_printf("%s.%04u-%02u-%02u-%02u:%02u:%02u", fn,
+                           t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+                           t->tm_hour, t->tm_min, t->tm_sec);
+#else
+    u8* nfn = alloc_printf("%s_%04u%02u%02u%02u%02u%02u", fn,
+                           t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+                           t->tm_hour, t->tm_min, t->tm_sec);
+#endif /* ^!SIMPLE_FILES */
+    rename(fn, nfn); /* Ignore errors. */
+    ck_free(nfn);
+  }
+  if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
+  ck_free(fn);
+
+  fn = alloc_printf("%s/memory", out_dir);
+  if (delete_files(fn, NULL)) goto dir_cleanup_failed;
+  ck_free(fn);
+
   /* And now, for some finishing touches. */
 
   fn = alloc_printf("%s/.cur_input", out_dir);
