@@ -3843,7 +3843,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   }
 }
 
-static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
+static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *valexe = "";
   u8 *covdir = "";
   u8 *tmpfile = "";
@@ -3852,8 +3852,8 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *tmp_argv1 = "";
   u32 num = 1 + UR(ARITH_MAX);
 
-  if(!getenv("PACFIX_VAL_EXE")) return;
-  if(!getenv("PACFIX_COV_DIR")) return;
+  if(!getenv("PACFIX_VAL_EXE")) return 1;
+  if(!getenv("PACFIX_COV_DIR")) return 1;
   valexe = getenv("PACFIX_VAL_EXE");
   covdir = getenv("PACFIX_COV_DIR");
   tmpfile = alloc_printf("%s/__tmp_file_%d", covdir, num);
@@ -3870,7 +3870,7 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
 
   if (access(tmpfile, F_OK) != 0) {
     ck_free(tmpfile);
-    return;
+    return 0;
   }
 
   u32 hash = hash_file(tmpfile);
@@ -3878,13 +3878,13 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
   if (kvp) {
     ck_free(tmpfile);
-    return;
+    return 0;
   }
   u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
                                  crashed == 1 ? total_saved_crashes : total_saved_positives);
   hashmap_insert(unique_mem_hashmap, hash, target_file);
-  LOGF("[pacfix] [mem] [crash %u] [id %llu] [hash %u] [time %llu] [file %s]\n",
-       crashed, crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
+  LOGF("[pacfix] [mem] [%s] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos",
+       crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
   if (crashed == 1) {
      total_saved_crashes++;
@@ -3895,6 +3895,7 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   rename(tmpfile, target_file);
   ck_free(tmpfile);
   ck_free(target_file);
+  return 1;
 
 }
 
@@ -3926,6 +3927,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   s32 fd;
   u8  keeping = 0, res;
   u8 has_valid_unique_path = 0;
+  u8 save_to_file = 0;
   struct proximity_score prox_score;
 
   if (dfg_node_info_map) {
@@ -4063,7 +4065,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 keep_as_crash:
 
       if (!check_coverage(1, argv, mem, len)) return keeping;
-      get_valuation(1, argv, mem, len);
+      save_to_file = get_valuation(1, argv, mem, len);
 
       /* This is handled in a manner roughly similar to timeouts,
          except for slightly different limits and no need to re-run test
@@ -4113,7 +4115,7 @@ keep_as_crash:
       break;
     case FAULT_NONE:
       if (!check_coverage(0, argv, mem, len)) return keeping;
-      get_valuation(0, argv, mem, len);
+      save_to_file = get_valuation(0, argv, mem, len);
 
       total_normals++;
 
@@ -4139,7 +4141,7 @@ keep_as_crash:
 
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
-  if (has_valid_unique_path) {
+  if (has_valid_unique_path || save_to_file) {
     LOGF("[moo] [save] [id %u] [moo-id %u] [fault %u] [file %s] [time %llu]\n",
             queued_paths, hashmap_size(dfg_hashmap), fault, fn, get_cur_time() - start_time);
     fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
