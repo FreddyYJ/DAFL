@@ -3852,8 +3852,8 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *tmp_argv1 = "";
   u32 num = 1 + UR(ARITH_MAX);
 
-  if(!getenv("PACFIX_VAL_EXE")) return 1;
-  if(!getenv("PACFIX_COV_DIR")) return 1;
+  if(!getenv("PACFIX_VAL_EXE")) return 0;
+  if(!getenv("PACFIX_COV_DIR")) return 0;
   valexe = getenv("PACFIX_VAL_EXE");
   covdir = getenv("PACFIX_COV_DIR");
   tmpfile = alloc_printf("%s/__tmp_file_%d", covdir, num);
