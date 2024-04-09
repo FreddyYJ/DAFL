@@ -257,6 +257,15 @@ static u32 max_queue_size = 4096;          /* Maximum input in queue            
 static u32 unique_dafl_input = 0;     /* Number of unique input with new coverage on def-use graph */
 static FILE* unique_dafl_log_file = NULL; /* File to record unique input with new coverage on def-use graph */
 
+#define LOGF(x...) do { \
+    if (not_on_tty) \
+      ACTF_NNL(x); \
+    if (unique_dafl_log_file) { \
+      fprintf(unique_dafl_log_file, x); \
+      fflush(unique_dafl_log_file);     \
+    } \
+  } while (0)
+
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
                           *queue_cur, /* Current offset within the queue  */
                           *queue_last;/* Lastly added to the queue        */
@@ -298,6 +307,8 @@ static struct proximity_score total_prox_score; /* Sum of proximity scores      
 static struct proximity_score avg_prox_score; /* Average of proximity scores      */
 
 static struct hashmap *dfg_hashmap;     /* Hashmap for DFG coverage         */
+
+static struct hashmap *unique_mem_hashmap; /* Hashmap for unique memory valuation */
 
 static u32 no_dfg_schedule = 0;      /* No DFG-based seed scheduling     */
 static u32 t_x = 0;                   /* To test AFLGo's scheduling       */
@@ -1205,10 +1216,10 @@ static void update_dfg_count_map(struct queue_entry *q) {
 
   if (is_unique) {
     unique_dafl_input++;
-    fprintf(unique_dafl_log_file, "[q] [uniq] [id %u] [orig %llu] [adj %.4f] [cov %u] [cnt %u]\n",
+    LOGF("[q] [uniq] [id %u] [orig %llu] [adj %.4f] [cov %u] [cnt %u]\n",
             q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered, unique_dafl_input);
   } else {
-    fprintf(unique_dafl_log_file, "[q] [non-uniq] [id %u] [orig %llu] [adj %.4f] [cov %u]\n",
+    LOGF("[q] [non-uniq] [id %u] [orig %llu] [adj %.4f] [cov %u]\n",
             q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered);
   }
 
@@ -1361,6 +1372,7 @@ static void init_dfg(u8* dfg_node_info_file) {
 
   dfg_count_map = ck_alloc(DFG_MAP_SIZE * sizeof(u32));
   dfg_hashmap = hashmap_create(max_queue_size);
+  unique_mem_hashmap = hashmap_create(max_queue_size);
 
   if (!dfg_node_info_file) {
     if (use_moo_scheduler) {
@@ -1471,10 +1483,8 @@ static void update_dfg_score(struct queue_entry *q_preserve) {
         total_prox_score.adjusted -= q_remove->prox_score.adjusted;
         destroy_queue_entry(q_remove, 1);
         // Should we reduce the count of the dfg_count_map?
-        if (not_on_tty) {
-          SAYF("Remove entry from queue: %u, orig: %llu, adj: %f, covered: %u\n", q_remove->entry_id, q_remove->prox_score.original, q_remove->prox_score.adjusted, q_remove->prox_score.covered);
-        }
-        fprintf(unique_dafl_log_file, "[q] [rm] [q %u] [id %u] [orig %llu] [adj %f] [cov %u]\n",
+        // Remove entry from queue
+        LOGF("[q] [rm] [q %u] [id %u] [orig %llu] [adj %f] [cov %u]\n",
                 queued_paths, q_remove->entry_id, q_remove->prox_score.original, q_remove->prox_score.adjusted, q_remove->prox_score.covered);
       } else {
         revert_remove = 1;
@@ -1495,16 +1505,11 @@ static void update_dfg_score(struct queue_entry *q_preserve) {
   avg_covered = avg_covered / queued_paths_cur;
   u64 end_time = get_cur_time();
 
-  if (not_on_tty) {
-    SAYF("Queue size: %u, cur_q: %u, avg covered: %u, time elapsed: %llums\n", queued_paths, queued_paths_cur, avg_covered, end_time - start_time);
-    SAYF("Orig score: min: %llu, max: %llu, avg: %llu, total: %llu\n", min_prox_score.original, max_prox_score.original, avg_prox_score.original, total_prox_score.original);
-    SAYF("Adj score: min: %f, max: %f, avg: %f, total: %f\n", min_prox_score.adjusted, max_prox_score.adjusted, avg_prox_score.adjusted, total_prox_score.adjusted);
-  }
-  fprintf(unique_dafl_log_file, "[stat] [queue] [id %u] [cur %u] [avg_cov %u] [time %llu]\n", 
+  LOGF( "[stat] [queue] [id %u] [cur %u] [avg_cov %u] [time %llu]\n",
           queued_paths, queued_paths_cur, avg_covered, end_time - start_time);
-  fprintf(unique_dafl_log_file, "[stat] [orig] [id %u] [min %llu] [max %llu] [avg %llu] [total %llu]\n",
+  LOGF( "[stat] [orig] [id %u] [min %llu] [max %llu] [avg %llu] [total %llu]\n",
           queued_paths, min_prox_score.original, max_prox_score.original, avg_prox_score.original, total_prox_score.original);
-  fprintf(unique_dafl_log_file, "[stat] [adj] [id %u] [min %f] [max %f] [avg %f] [total %f]\n",
+  LOGF( "[stat] [adj] [id %u] [min %f] [max %f] [avg %f] [total %f]\n",
           queued_paths, min_prox_score.adjusted, max_prox_score.adjusted, avg_prox_score.adjusted, total_prox_score.adjusted);
 
 }
@@ -1858,7 +1863,7 @@ static struct queue_entry* select_next_entry() {
       }
     }
     if (!q)
-      fprintf(unique_dafl_log_file, "[sche] [defa] [id %u] [handled %u]\n", q->entry_id, q->handled_in_cycle);
+      LOGF("[sche] [defa] [id %u] [handled %u]\n", q->entry_id, q->handled_in_cycle);
     return q;
   }
 
@@ -1931,7 +1936,7 @@ static struct queue_entry* select_next_entry() {
   q->next_moo = recycled_queue;
   recycled_queue = q;
   if (!q)
-    fprintf(unique_dafl_log_file, "[sche] [moo] [id %u] [rank %d] [cycle %u]\n", q->entry_id, q->rank, moo_cycle);
+    LOGF("[sche] [moo] [id %u] [rank %d] [cycle %u]\n", q->entry_id, q->rank, moo_cycle);
 
   return q;
 
@@ -3751,6 +3756,27 @@ static void write_crash_readme(void) {
 
 }
 
+static u32 hash_file(u8 *filename) {
+
+  FILE *file = fopen(filename, "r");
+  if (!file) {
+    WARNF("Cannot open file %s", filename);
+    return 0;
+  }
+  fseek(file, 0, SEEK_END);
+  u64 length = ftell(file);
+  fseek(file, 0, SEEK_SET);
+  u64 max_read = 1 << 25; // 32MB
+  length = length < max_read ? length : max_read;
+  u8 *buf = ck_alloc_nozero(length);
+  fread(buf, 1, length, file);
+  fclose(file);
+  u32 hash = hash32(buf, length, HASH_CONST);
+  ck_free(buf);
+  return hash;
+
+}
+
 static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *covexe = "";
   u8 *covdir = "";
@@ -3781,17 +3807,19 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   argv[0] = covexe;
   fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
   argv[0] = tmp_argv1;
+  ck_free(tmpfile_env);
 
-  ACTF("[pacfix] checking coverage for line %d %s", line, tmpfile);
-
-  if (access(tmpfile, F_OK) == -1) return 0;
-
-  ACTF("[pacfix] [tmp] [crash %d] [tf %s]", crashed, tmpfile);
+  if (access(tmpfile, F_OK) == -1) {
+    ck_free(tmpfile);
+    return 0;
+  }
 
   if (crashed == 1) {
     // Read last line of covdir + "/__tmp_file" with tail -n 1 command
     cmd = alloc_printf("tail -n 1 %s", tmpfile);
     FILE *fp = popen(cmd, "r");
+    ck_free(tmpfile);
+    ck_free(cmd);
     if (fp == NULL) return 1;
     // __localize: <line_number> if line_number == line then return 1 else return 0
     u8 *result = fgets(covered, 100, fp);
@@ -3800,10 +3828,11 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
     if(sscanf(covered, "__localize: %d", &parsed_line) != 1) return 1;
     if(parsed_line == line) return 1;
     else return 0;
-  } 
-  else {
+  } else {
     cmd = alloc_printf("grep \"%d\" %s | wc -l", line, tmpfile);
     FILE *fp = popen(cmd, "r");
+    ck_free(tmpfile);
+    ck_free(cmd);
     if (fp == NULL) return 0;
     u8 *result = fgets(covered, 100, fp);
     pclose(fp);
@@ -3838,19 +3867,33 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   argv[0] = valexe;
   fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
   argv[0] = tmp_argv1;
+  ck_free(tmpfile_env);
 
-  if (access(tmpfile, F_OK) != 0) return;
+  if (access(tmpfile, F_OK) != 0) {
+    ck_free(tmpfile);
+    return;
+  }
+
+  u32 hash = hash_file(tmpfile);
+  // Check if the hash is already in the hashmap
+  struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
+  if (kvp) {
+    ck_free(tmpfile);
+    return;
+  }
+  hashmap_insert(unique_mem_hashmap, hash, alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos", crashed == 1 ? total_saved_crashes : total_saved_positives));
 
   if (crashed == 1) {
      cmd = alloc_printf("mv %s %s/memory/neg/id:%06llu", tmpfile, out_dir, total_saved_crashes);
      total_saved_crashes++;
-  }
-  else {
+  } else {
     cmd = alloc_printf("mv %s %s/memory/pos/id:%06llu", tmpfile, out_dir, total_saved_positives);
     total_saved_positives++;
   }
 
   FILE *fp = popen(cmd, "r");
+  ck_free(tmpfile);
+  ck_free(cmd);
   if (fp == NULL) return;
   pclose(fp);
 }
@@ -3902,15 +3945,11 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     //   return 0;
     // }
       compute_proximity_score(&prox_score, dfg_bits, 0);
-      if (not_on_tty) {
-        ACTF("[new-q] [id %u] [moo-id %u] [uniq %u] [cov %u] [prox %llu] [adj %f]",
-             queued_paths, hashmap_size(dfg_hashmap), has_valid_unique_path, prox_score.covered, prox_score.original, prox_score.adjusted);
-      }
       if (has_valid_unique_path) {
-          fprintf(unique_dafl_log_file, "[moo] [uniq] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f]\n",
+          LOGF("[moo] [uniq] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f]\n",
                   queued_paths, hashmap_size(dfg_hashmap), prox_score.covered, prox_score.original, prox_score.adjusted);
       } else {
-          fprintf(unique_dafl_log_file, "[moo] [no-uniq] [id %u] [cov %u] [prox %llu] [adj %f] [tgt %u]\n",
+          LOGF("[moo] [no-uniq] [id %u] [cov %u] [prox %llu] [adj %f] [tgt %u]\n",
                   queued_paths, prox_score.covered, prox_score.original, prox_score.adjusted, check_covered_target());
       }
 #ifndef SIMPLE_FILES
@@ -3949,9 +3988,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       keeping = 1;
     } else if (has_valid_unique_path) {
-      if (not_on_tty)
-        ACTF("[moo] [skip-q] [id %u] [moo-id %u] [uniq %u] no new bits", queued_paths, hashmap_size(dfg_hashmap), has_valid_unique_path);
-      fprintf(unique_dafl_log_file, "[moo] [uniq-skip] [id %u] [moo-id %u]\n", queued_paths, hashmap_size(dfg_hashmap));
+      LOGF("[moo] [uniq-skip] [id %u] [moo-id %u]\n", queued_paths, hashmap_size(dfg_hashmap));
     }
 
   }
@@ -4103,9 +4140,8 @@ keep_as_crash:
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
   if (has_valid_unique_path) {
-    fprintf(unique_dafl_log_file, "[moo] [save] [id %u] [moo-id %u] [fault %u] [file %s] [time %llu]\n",
+    LOGF("[moo] [save] [id %u] [moo-id %u] [fault %u] [file %s] [time %llu]\n",
             queued_paths, hashmap_size(dfg_hashmap), fault, fn, get_cur_time() - start_time);
-    fflush(unique_dafl_log_file);
     fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) PFATAL("Unable to create '%s'", fn);
     ck_write(fd, mem, len, fn);
@@ -9050,6 +9086,7 @@ stop_fuzzing:
   destroy_queue();
   destroy_extras();
   hashmap_free(dfg_hashmap);
+  hashmap_free(unique_mem_hashmap);
   ck_free(target_path);
   ck_free(sync_id);
   ck_free(dfg_count_map);

@@ -140,7 +140,7 @@ u32 vector_size(struct vector* vec) {
 // Hashmap
 struct key_value_pair {
   u32 key;
-  struct queue_entry* value;
+  void* value;
   struct key_value_pair* next;
 };
 
@@ -202,7 +202,7 @@ u32 hashmap_size(struct hashmap* map) {
 }
 
 // Function to insert a key-value pair into the hash map
-void hashmap_insert(struct hashmap* map, u32 key, struct queue_entry* value) {
+void hashmap_insert(struct hashmap* map, u32 key, void* value) {
   u32 index = hashmap_fit(key, map->table_size);
   struct key_value_pair* newPair = ck_alloc(sizeof(struct key_value_pair));
   if (newPair == NULL) {
