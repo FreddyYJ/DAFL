@@ -187,6 +187,10 @@
     SAYF(cRST "\n"); \
   } while (0)
 
+#define ACTF_NNL(x...) do { \
+    SAYF(cLBL "[*] " cRST x); \
+  } while (0)
+
 /* Show a prefixed "success" message. */
 
 #define OKF(x...) do { \
