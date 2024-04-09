@@ -3848,7 +3848,6 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *covdir = "";
   u8 *tmpfile = "";
   u8 *tmpfile_env = "";
-  u8 *cmd = "";
   u8 fault_tmp;
   u8 *tmp_argv1 = "";
   u32 num = 1 + UR(ARITH_MAX);
@@ -3881,21 +3880,22 @@ static void get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
     ck_free(tmpfile);
     return;
   }
-  hashmap_insert(unique_mem_hashmap, hash, alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos", crashed == 1 ? total_saved_crashes : total_saved_positives));
+  u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
+                                 crashed == 1 ? total_saved_crashes : total_saved_positives);
+  hashmap_insert(unique_mem_hashmap, hash, target_file);
+  LOGF("[pacfix] [mem] [crash %u] [id %llu] [hash %u] [time %llu] [file %s]\n",
+       crashed, crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
   if (crashed == 1) {
-     cmd = alloc_printf("mv %s %s/memory/neg/id:%06llu", tmpfile, out_dir, total_saved_crashes);
      total_saved_crashes++;
   } else {
-    cmd = alloc_printf("mv %s %s/memory/pos/id:%06llu", tmpfile, out_dir, total_saved_positives);
     total_saved_positives++;
   }
-
-  FILE *fp = popen(cmd, "r");
+  target_file = alloc_printf("%s/%s", out_dir, target_file);
+  rename(tmpfile, target_file);
   ck_free(tmpfile);
-  ck_free(cmd);
-  if (fp == NULL) return;
-  pclose(fp);
+  ck_free(target_file);
+
 }
 
 static u8 check_unique_path() {
