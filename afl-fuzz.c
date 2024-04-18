@@ -155,6 +155,7 @@ EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
 EXP_ST u64 dfg_node_count[DFG_MAP_SIZE];  /* Node counts for DFG              */
 EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
 EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
+EXP_ST s32 dfg_targets[DFG_MAP_SIZE];
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -1176,6 +1177,11 @@ static u32 count_non_255_bytes(u8* mem) {
 static u8 check_covered_target() {
   if (dfg_target_idx < DFG_MAP_SIZE)
     return dfg_bits[dfg_target_idx] != 0;
+//  for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+//    s32 idx = dfg_targets[i];
+//    if (idx < 0) break;
+//    if (dfg_bits[idx] != 0) return 1;
+//  }
   return 0;
 }
 
@@ -1335,7 +1341,7 @@ static u8 recompute_proximity_score(struct queue_entry* q) {
       u32 index = q->prox_score.dfg_dense_map[i * 2];
       u32 score = q->prox_score.dfg_dense_map[i * 2 + 1];
       u32 count = dfg_count_map[index];
-      if (use_moo_scheduler) {
+      if (use_moo_scheduler && proximity_score_allowance < 0) {
         u32 max_paths = dfg_node_info_map[index].max_paths;
         if (count > max_paths) {
           count = max_paths;
@@ -1408,8 +1414,16 @@ static void init_dfg(u8* dfg_node_info_file) {
     idx++;
   }
   fclose(file);
-  ACTF("Check dfg_node_info_map target: %u, max_score: %u vs idx %u, score %u", dfg_target_idx, max_score,
-       dfg_node_info_map[dfg_target_idx].idx, dfg_node_info_map[dfg_target_idx].score);
+  u32 dfg_target_count = 0;
+  memset(dfg_targets, -1, DFG_MAP_SIZE * sizeof(u32));
+  for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+    if (dfg_node_info_map[i].score >= max_score - 1) {
+      dfg_targets[dfg_target_count++] = i;
+    }
+  }
+  dfg_targets[dfg_target_count] = -1;
+  ACTF("Check dfg_node_info_map target: %u, max_score: %u vs idx %u, score %u, target_cnt: %u", dfg_target_idx, max_score,
+       dfg_node_info_map[dfg_target_idx].idx, dfg_node_info_map[dfg_target_idx].score, dfg_target_count);
 }
 
 static void update_global_prox_score(struct proximity_score *prox_score) {
@@ -1429,6 +1443,22 @@ static void update_global_prox_score(struct proximity_score *prox_score) {
   total_prox_score.original += prox_score->original;
   total_prox_score.adjusted += prox_score->adjusted;
 
+}
+
+static void update_dfg_score_moo() {
+  init_global_prox_score(); // Reset the global proximity score: max, min, total, avg
+  struct queue_entry *q = queue;
+  while (q) {
+    recompute_proximity_score(q);
+    update_global_prox_score(&q->prox_score);
+    q = q->next;
+  }
+  avg_prox_score.original = total_prox_score.original / queued_paths_cur;
+  avg_prox_score.adjusted = total_prox_score.adjusted / queued_paths_cur;
+  LOGF("[stat] [moo] [orig] [min %llu] [max %llu] [avg %llu] [total %llu]\n",
+          min_prox_score.original, max_prox_score.original, avg_prox_score.original, total_prox_score.original);
+  LOGF("[stat] [moo] [adj] [min %f] [max %f] [avg %f] [total %f]\n",
+          min_prox_score.adjusted, max_prox_score.adjusted, avg_prox_score.adjusted, total_prox_score.adjusted);
 }
 
 static void update_dfg_score(struct queue_entry *q_preserve) {
@@ -1862,8 +1892,6 @@ static struct queue_entry* select_next_entry() {
         q = q->next;
       }
     }
-    if (!q)
-      LOGF("[sche] [defa] [id %u] [handled %u]\n", q->entry_id, q->handled_in_cycle);
     return q;
   }
 
@@ -1871,8 +1899,9 @@ static struct queue_entry* select_next_entry() {
   if (!pareto_frontier_queue) {
     // If the pareto frontier queue is empty, select from the dominated queue
     // First, update the adjusted score
+    LOGF("[sche] [moo] [cycle %u]\n", moo_cycle);
     if (proximity_score_allowance >= 0) {
-      struct queue_entry *q = queue;
+      q = queue;
       while (q) {
         recompute_proximity_score(q);
         q = q->next;
@@ -1931,13 +1960,12 @@ static struct queue_entry* select_next_entry() {
     vector_free(ranked_vec);
   }
   // Pop from pareto_frontier_queue, push to recycled_queue
+  struct queue_entry *prev = queue_cur;
   q = pareto_frontier_queue;
   pareto_frontier_queue = q->next_moo;
   q->next_moo = recycled_queue;
   recycled_queue = q;
-  if (!q)
-    LOGF("[sche] [moo] [id %u] [rank %d] [cycle %u]\n", q->entry_id, q->rank, moo_cycle);
-
+  LOGF("[sel] [moo] [prev %u] [cur %u] [rank %d]\n", prev->entry_id, q->entry_id, queue_rank);
   return q;
 
 }
@@ -3801,6 +3829,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   tmpfile = alloc_printf("%s/__tmp_file_%d", covdir, num);
   tmpfile_env = alloc_printf("PACFIX_FILENAME=%s", tmpfile);
   // Remove covdir + "/__tmp_file" (It might not exist, but that's okay)
+  ACTF("[tmp] [file %s] [crashed %d]\n", tmpfile, crashed);
   unlink(tmpfile);
   write_to_testcase(mem, len);
   tmp_argv1 = argv[0];
@@ -3814,7 +3843,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
     return 0;
   }
 
-  if (crashed == 1) {
+  if (0 && crashed == 1) {
     // Read last line of covdir + "/__tmp_file" with tail -n 1 command
     cmd = alloc_printf("tail -n 1 %s", tmpfile);
     FILE *fp = popen(cmd, "r");
@@ -3867,16 +3896,18 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
   argv[0] = tmp_argv1;
   ck_free(tmpfile_env);
-
-  if (access(tmpfile, F_OK) != 0) {
+  if (access(tmpfile, F_OK) == -1) {
+//    SAYF("[pacfix] [val err] [file %s] not found\n", tmpfile);
     ck_free(tmpfile);
     return 0;
   }
-
+//  SAYF("[pacfix] [val] [file %s] [crashed %d]\n", tmpfile, crashed);
   u32 hash = hash_file(tmpfile);
   // Check if the hash is already in the hashmap
   struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
   if (kvp) {
+//    SAYF("[pacfix] [mem] [non-uniq] [%s] [id %llu] [hash %u]\n", crashed == 1 ? "neg" : "pos",
+//         crashed == 1 ? total_saved_crashes : total_saved_positives, hash);
     ck_free(tmpfile);
     return 0;
   }
@@ -8870,12 +8901,16 @@ int main(int argc, char** argv) {
         break;
 
     case 's':    /* Parameter to set scheduler */
-      if (optarg[0] == 'm')
+      if (optarg[0] == 'm') {
         use_moo_scheduler = 1;
-      else if (optarg[0] == 'd')
+      } else if (optarg[0] == 'd') {
         use_moo_scheduler = 0;
-      else
+      } else {
         use_moo_scheduler = 1;
+      }
+      if (use_moo_scheduler) {
+        proximity_score_allowance = 0;
+      }
       break;
 
     case 'p':    /* Set dfg_node_info_file */
