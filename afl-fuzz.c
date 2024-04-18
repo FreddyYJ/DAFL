@@ -3826,11 +3826,10 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   covdir = getenv("PACFIX_COV_DIR");
   sscanf(getenv("PACFIX_TARGET_LINE"), "%d", &line);
 
-  tmpfile = alloc_printf("%s/__tmp_file_%d", covdir, num);
+  tmpfile = alloc_printf((crashed == 1 ? "%s/__coverage_file_%llu" : "%s/__coverage_file_noncrash_%llu"), covdir, (crashed == 1 ? total_saved_crashes : total_saved_positives));
   tmpfile_env = alloc_printf("PACFIX_FILENAME=%s", tmpfile);
-  // Remove covdir + "/__tmp_file" (It might not exist, but that's okay)
-  ACTF("[tmp] [file %s] [crashed %d]\n", tmpfile, crashed);
-  unlink(tmpfile);
+  chmod(tmpfile,0777);
+  u8 error_code = remove(tmpfile);
   write_to_testcase(mem, len);
   tmp_argv1 = argv[0];
   argv[0] = covexe;
@@ -3843,16 +3842,21 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
     return 0;
   }
 
-  if (0 && crashed == 1) {
+  if (crashed == 1) {
     // Read last line of covdir + "/__tmp_file" with tail -n 1 command
     cmd = alloc_printf("tail -n 1 %s", tmpfile);
     FILE *fp = popen(cmd, "r");
-    ck_free(tmpfile);
-    ck_free(cmd);
-    if (fp == NULL) return 1;
+    if (fp == NULL) {
+      ck_free(tmpfile);
+      ck_free(cmd);
+      return 0;
+    }
     // __localize: <line_number> if line_number == line then return 1 else return 0
     u8 *result = fgets(covered, 100, fp);
     pclose(fp);
+    remove(tmpfile);
+    ck_free(tmpfile);
+    ck_free(cmd);
     if (result == NULL) return 1;
     if(sscanf(covered, "__localize: %d", &parsed_line) != 1) return 1;
     if(parsed_line == line) return 1;
@@ -3860,11 +3864,16 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   } else {
     cmd = alloc_printf("grep \"%d\" %s | wc -l", line, tmpfile);
     FILE *fp = popen(cmd, "r");
-    ck_free(tmpfile);
-    ck_free(cmd);
-    if (fp == NULL) return 0;
+    if (fp == NULL) {
+      ck_free(tmpfile);
+      ck_free(cmd);
+      return 0;
+    }
     u8 *result = fgets(covered, 100, fp);
     pclose(fp);
+    remove(tmpfile);
+    ck_free(tmpfile);
+    ck_free(cmd);
     if (result == NULL) return 0;
     if(sscanf(covered, "%d", &parsed_line) != 1) return 0;
     if (parsed_line == 0) return 0;
@@ -3885,29 +3894,29 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   if(!getenv("PACFIX_COV_DIR")) return 0;
   valexe = getenv("PACFIX_VAL_EXE");
   covdir = getenv("PACFIX_COV_DIR");
-  tmpfile = alloc_printf("%s/__tmp_file_%d", covdir, num);
+  tmpfile = alloc_printf((crashed == 1 ? "%s/__valuation_file_%llu" : "%s/__valuation_file_noncrash_%llu"), covdir, (crashed == 1 ? total_saved_crashes : total_saved_positives));
   tmpfile_env = alloc_printf("PACFIX_FILENAME=%s", tmpfile);
 
   // Remove covdir + "/__tmp_file" (It might not exist, but that's okay)
-  unlink(tmpfile);
+  chmod(tmpfile,0777);
+  u8 error_code = remove(tmpfile);
   write_to_testcase(mem, len);
   tmp_argv1 = argv[0];
   argv[0] = valexe;
   fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
   argv[0] = tmp_argv1;
   ck_free(tmpfile_env);
-  if (access(tmpfile, F_OK) == -1) {
-//    SAYF("[pacfix] [val err] [file %s] not found\n", tmpfile);
+
+  if (access(tmpfile, F_OK) != 0) {
     ck_free(tmpfile);
     return 0;
   }
-//  SAYF("[pacfix] [val] [file %s] [crashed %d]\n", tmpfile, crashed);
+
   u32 hash = hash_file(tmpfile);
   // Check if the hash is already in the hashmap
   struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
   if (kvp) {
-//    SAYF("[pacfix] [mem] [non-uniq] [%s] [id %llu] [hash %u]\n", crashed == 1 ? "neg" : "pos",
-//         crashed == 1 ? total_saved_crashes : total_saved_positives, hash);
+    remove(tmpfile);
     ck_free(tmpfile);
     return 0;
   }
@@ -3918,7 +3927,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
        crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
   if (crashed == 1) {
-     total_saved_crashes++;
+    total_saved_crashes++;
   } else {
     total_saved_positives++;
   }
