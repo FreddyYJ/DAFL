@@ -1901,11 +1901,7 @@ static struct queue_entry* select_next_entry() {
     // First, update the adjusted score
     LOGF("[sche] [moo] [cycle %u]\n", moo_cycle);
     if (proximity_score_allowance >= 0) {
-      q = queue;
-      while (q) {
-        recompute_proximity_score(q);
-        q = q->next;
-      }
+      update_dfg_score_moo();
     }
     // First, update the dominated queue with the new entries
     moo_cycle++;
@@ -1926,6 +1922,7 @@ static struct queue_entry* select_next_entry() {
     vector_free(new_entries);
     // If the dominated queue is empty, select from the recycled queue
     if (!dominated_queue) {
+      LOGF("[sche] [moo] [recycled]\n");
       queue_rank = -1;
       q = recycled_queue;
       while (q) {
@@ -1937,22 +1934,21 @@ static struct queue_entry* select_next_entry() {
       struct queue_entry *q_next = q;
       recycled_queue = NULL;
       while (q) {
-        update_ranks(q, q_next);
+        while (q_next) {
+          update_ranks(q, q_next);
+          q_next = q_next->next_moo;
+        }
+        q = q->next_moo;
       }
     }
+    // Construct the pareto frontier queue from the dominated queue
     queue_rank++;
-    q = NULL;
     struct vector *ranked_vec = list_to_vector(dominated_queue);
     for (u32 i = 0; i < vector_size(ranked_vec); i++) {
       struct queue_entry *entry = vector_get(ranked_vec, i);
       if (entry->rank == queue_rank) {
-        if (q) {
-          q->next_moo = entry;
-        } else {
-          pareto_frontier_queue = entry;
-        }
-        q = entry;
-        q->next_moo = NULL;
+        entry->next_moo = pareto_frontier_queue;
+        pareto_frontier_queue = entry;
         vector_set(ranked_vec, i, NULL);
       }
     }
@@ -1965,7 +1961,8 @@ static struct queue_entry* select_next_entry() {
   pareto_frontier_queue = q->next_moo;
   q->next_moo = recycled_queue;
   recycled_queue = q;
-  LOGF("[sel] [moo] [prev %u] [cur %u] [rank %d]\n", prev->entry_id, q->entry_id, queue_rank);
+  LOGF("[sel] [moo] [prev %u] [cur %u] [rank %d] [time %llu]\n",
+       prev->entry_id, q->entry_id, queue_rank, get_cur_time() - start_time);
   return q;
 
 }
@@ -5587,6 +5584,9 @@ static u32 choose_block_len(u32 limit) {
 /* Calculate the factor to multiply to the performance score. This is derived
  * from the proximity scores of the DFG nodes covered by the test case. */
 static double calculate_factor(double prox_score) {
+
+  SAYF("[cal-factor] [prox %lf] [avg %lf] [min %lf] [max %lf]\n",
+       prox_score, avg_prox_score.adjusted, min_prox_score.adjusted, max_prox_score.adjusted);
 
   double factor;
   double normalized_prox_score, progress_to_tx, T, p;
