@@ -3178,6 +3178,182 @@ static void write_with_gap(void* mem, u32 len, u32 skip_at, u32 skip_len) {
 
 }
 
+static u8 check_unique_path() {
+  if (!check_covered_target()) return 0;
+  // q->trace_mini = ck_alloc(MAP_SIZE >> 3);
+  // minimize_bits(q->trace_mini, trace_bits);
+  u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+  // SAYF("[unique-path] [id %u] [checksum %u]\n", queued_paths, checksum);
+  struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
+  if (!kvp) {
+    if (not_on_tty) {
+      ACTF("Found unique path %u, checksum %u", queued_paths, checksum);
+    }
+    hashmap_insert(dfg_hashmap, checksum, NULL);
+    update_dfg_count_map(NULL);
+    return 1;
+  }
+  // SAYF("[non-unique-path] [id %u] [checksum %u]\n", queued_paths, checksum);
+  return 0;
+}
+
+static u32 hash_file(u8 *filename) {
+
+  FILE *file = fopen(filename, "r");
+  if (!file) {
+    WARNF("Cannot open file %s", filename);
+    return 0;
+  }
+  fseek(file, 0, SEEK_END);
+  u64 length = ftell(file);
+  fseek(file, 0, SEEK_SET);
+  u64 max_read = 1 << 25; // 32MB
+  length = length < max_read ? length : max_read;
+  u8 *buf = ck_alloc_nozero(length);
+  fread(buf, 1, length, file);
+  fclose(file);
+  u32 hash = hash32(buf, length, HASH_CONST);
+  ck_free(buf);
+  return hash;
+
+}
+
+static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
+  u8 *covexe = "";
+  u8 *covdir = "";
+  u8 *tmpfile = "";
+  u8 *tmpfile_env = "";
+  u8 *cmd = "";
+  u8 covered[100] = "";
+  u8 *tmp_argv1 = "";
+
+  if (!crashed) return check_covered_target();
+  if (crashed && !check_covered_target()) return 0;
+
+  u8 fault_tmp;
+  u32 line = 0;
+  u32 parsed_line = 0;
+  u32 num = 1 + UR(ARITH_MAX);
+
+  if(!getenv("PACFIX_COV_EXE")) return 1;
+  if(!getenv("PACFIX_COV_DIR")) return 1;
+  if(!getenv("PACFIX_TARGET_LINE")) return 1;
+  covexe = getenv("PACFIX_COV_EXE");
+  covdir = getenv("PACFIX_COV_DIR");
+  sscanf(getenv("PACFIX_TARGET_LINE"), "%d", &line);
+
+  tmpfile = alloc_printf((crashed == 1 ? "%s/__coverage_file_%llu" : "%s/__coverage_file_noncrash_%llu"), covdir, (crashed == 1 ? total_saved_crashes : total_saved_positives));
+  tmpfile_env = alloc_printf("PACFIX_FILENAME=%s", tmpfile);
+  chmod(tmpfile,0777);
+  u8 error_code = remove(tmpfile);
+  write_to_testcase(mem, len);
+  tmp_argv1 = argv[0];
+  argv[0] = covexe;
+  fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
+  argv[0] = tmp_argv1;
+  ck_free(tmpfile_env);
+
+  if (access(tmpfile, F_OK) == -1) {
+    ck_free(tmpfile);
+    return 0;
+  }
+
+  if (crashed == 1) {
+    // Read last line of covdir + "/__tmp_file" with tail -n 1 command
+    cmd = alloc_printf("tail -n 1 %s", tmpfile);
+    FILE *fp = popen(cmd, "r");
+    if (fp == NULL) {
+      ck_free(tmpfile);
+      ck_free(cmd);
+      return 0;
+    }
+    // __localize: <line_number> if line_number == line then return 1 else return 0
+    u8 *result = fgets(covered, 100, fp);
+    pclose(fp);
+    remove(tmpfile);
+    ck_free(tmpfile);
+    ck_free(cmd);
+    if (result == NULL) return 1;
+    if(sscanf(covered, "__localize: %d", &parsed_line) != 1) return 1;
+    if(parsed_line == line) return 1;
+    else return 0;
+  } else {
+    cmd = alloc_printf("grep \"%d\" %s | wc -l", line, tmpfile);
+    FILE *fp = popen(cmd, "r");
+    if (fp == NULL) {
+      ck_free(tmpfile);
+      ck_free(cmd);
+      return 0;
+    }
+    u8 *result = fgets(covered, 100, fp);
+    pclose(fp);
+    remove(tmpfile);
+    ck_free(tmpfile);
+    ck_free(cmd);
+    if (result == NULL) return 0;
+    if(sscanf(covered, "%d", &parsed_line) != 1) return 0;
+    if (parsed_line == 0) return 0;
+    else return 1;
+  }
+}
+
+static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
+  u8 *valexe = "";
+  u8 *covdir = "";
+  u8 *tmpfile = "";
+  u8 *tmpfile_env = "";
+  u8 fault_tmp;
+  u8 *tmp_argv1 = "";
+  u32 num = 1 + UR(ARITH_MAX);
+
+  if(!getenv("PACFIX_VAL_EXE")) return 0;
+  if(!getenv("PACFIX_COV_DIR")) return 0;
+  valexe = getenv("PACFIX_VAL_EXE");
+  covdir = getenv("PACFIX_COV_DIR");
+  tmpfile = alloc_printf((crashed == 1 ? "%s/__valuation_file_%llu" : "%s/__valuation_file_noncrash_%llu"), covdir, (crashed == 1 ? total_saved_crashes : total_saved_positives));
+  tmpfile_env = alloc_printf("PACFIX_FILENAME=%s", tmpfile);
+
+  // Remove covdir + "/__tmp_file" (It might not exist, but that's okay)
+  chmod(tmpfile,0777);
+  u8 error_code = remove(tmpfile);
+  write_to_testcase(mem, len);
+  tmp_argv1 = argv[0];
+  argv[0] = valexe;
+  fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
+  argv[0] = tmp_argv1;
+  ck_free(tmpfile_env);
+
+  if (access(tmpfile, F_OK) != 0) {
+    ck_free(tmpfile);
+    return 0;
+  }
+
+  u32 hash = hash_file(tmpfile);
+  // Check if the hash is already in the hashmap
+  struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
+  if (kvp) {
+    remove(tmpfile);
+    ck_free(tmpfile);
+    return 0;
+  }
+  u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
+                                 crashed == 1 ? total_saved_crashes : total_saved_positives);
+  hashmap_insert(unique_mem_hashmap, hash, target_file);
+  LOGF("[pacfix] [mem] [%s] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos",
+       crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
+
+  if (crashed == 1) {
+    total_saved_crashes++;
+  } else {
+    total_saved_positives++;
+  }
+  target_file = alloc_printf("%s/%s", out_dir, target_file);
+  rename(tmpfile, target_file);
+  ck_free(tmpfile);
+  ck_free(target_file);
+  return 1;
+
+}
 
 static void show_stats(void);
 
@@ -3393,7 +3569,6 @@ static void perform_dry_run(char** argv) {
     close(fd);
 
     res = calibrate_case(argv, q, use_mem, 0, 1);
-    ck_free(use_mem);
 
     if (stop_soon) return;
 
@@ -3408,6 +3583,13 @@ static void perform_dry_run(char** argv) {
         if (q == queue) check_map_coverage();
 
         if (crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);
+
+        if (check_coverage(0, argv, use_mem, q->len)) {
+          if (dfg_node_info_map) {
+            check_unique_path();
+          }
+          get_valuation(0, argv, use_mem, q->len);
+        }
 
         break;
 
@@ -3451,6 +3633,13 @@ static void perform_dry_run(char** argv) {
         }
 
       case FAULT_CRASH:
+
+        if (check_coverage(1, argv, use_mem, q->len)) {
+          if (dfg_node_info_map) {
+            check_unique_path();
+          }
+          get_valuation(1, argv, use_mem, q->len);
+        }
 
         if (crash_mode) break;
 
@@ -3545,6 +3734,8 @@ static void perform_dry_run(char** argv) {
     if (q->var_behavior) WARNF("Instrumentation output varies across runs.");
 
     q = q->next;
+
+    ck_free(use_mem);
 
   }
 
@@ -3781,177 +3972,6 @@ static void write_crash_readme(void) {
 
 }
 
-static u32 hash_file(u8 *filename) {
-
-  FILE *file = fopen(filename, "r");
-  if (!file) {
-    WARNF("Cannot open file %s", filename);
-    return 0;
-  }
-  fseek(file, 0, SEEK_END);
-  u64 length = ftell(file);
-  fseek(file, 0, SEEK_SET);
-  u64 max_read = 1 << 25; // 32MB
-  length = length < max_read ? length : max_read;
-  u8 *buf = ck_alloc_nozero(length);
-  fread(buf, 1, length, file);
-  fclose(file);
-  u32 hash = hash32(buf, length, HASH_CONST);
-  ck_free(buf);
-  return hash;
-
-}
-
-static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
-  u8 *covexe = "";
-  u8 *covdir = "";
-  u8 *tmpfile = "";
-  u8 *tmpfile_env = "";
-  u8 *cmd = "";
-  u8 covered[100] = "";
-  u8 *tmp_argv1 = "";
-
-  u8 fault_tmp;
-  u32 line = 0;
-  u32 parsed_line = 0;
-  u32 num = 1 + UR(ARITH_MAX);
-
-  if(!getenv("PACFIX_COV_EXE")) return 1;
-  if(!getenv("PACFIX_COV_DIR")) return 1;
-  if(!getenv("PACFIX_TARGET_LINE")) return 1;
-  covexe = getenv("PACFIX_COV_EXE");
-  covdir = getenv("PACFIX_COV_DIR");
-  sscanf(getenv("PACFIX_TARGET_LINE"), "%d", &line);
-
-  tmpfile = alloc_printf((crashed == 1 ? "%s/__coverage_file_%llu" : "%s/__coverage_file_noncrash_%llu"), covdir, (crashed == 1 ? total_saved_crashes : total_saved_positives));
-  tmpfile_env = alloc_printf("PACFIX_FILENAME=%s", tmpfile);
-  chmod(tmpfile,0777);
-  u8 error_code = remove(tmpfile);
-  write_to_testcase(mem, len);
-  tmp_argv1 = argv[0];
-  argv[0] = covexe;
-  fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
-  argv[0] = tmp_argv1;
-  ck_free(tmpfile_env);
-
-  if (access(tmpfile, F_OK) == -1) {
-    ck_free(tmpfile);
-    return 0;
-  }
-
-  if (crashed == 1) {
-    // Read last line of covdir + "/__tmp_file" with tail -n 1 command
-    cmd = alloc_printf("tail -n 1 %s", tmpfile);
-    FILE *fp = popen(cmd, "r");
-    if (fp == NULL) {
-      ck_free(tmpfile);
-      ck_free(cmd);
-      return 0;
-    }
-    // __localize: <line_number> if line_number == line then return 1 else return 0
-    u8 *result = fgets(covered, 100, fp);
-    pclose(fp);
-    remove(tmpfile);
-    ck_free(tmpfile);
-    ck_free(cmd);
-    if (result == NULL) return 1;
-    if(sscanf(covered, "__localize: %d", &parsed_line) != 1) return 1;
-    if(parsed_line == line) return 1;
-    else return 0;
-  } else {
-    cmd = alloc_printf("grep \"%d\" %s | wc -l", line, tmpfile);
-    FILE *fp = popen(cmd, "r");
-    if (fp == NULL) {
-      ck_free(tmpfile);
-      ck_free(cmd);
-      return 0;
-    }
-    u8 *result = fgets(covered, 100, fp);
-    pclose(fp);
-    remove(tmpfile);
-    ck_free(tmpfile);
-    ck_free(cmd);
-    if (result == NULL) return 0;
-    if(sscanf(covered, "%d", &parsed_line) != 1) return 0;
-    if (parsed_line == 0) return 0;
-    else return 1;
-  }
-}
-
-static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
-  u8 *valexe = "";
-  u8 *covdir = "";
-  u8 *tmpfile = "";
-  u8 *tmpfile_env = "";
-  u8 fault_tmp;
-  u8 *tmp_argv1 = "";
-  u32 num = 1 + UR(ARITH_MAX);
-
-  if(!getenv("PACFIX_VAL_EXE")) return 0;
-  if(!getenv("PACFIX_COV_DIR")) return 0;
-  valexe = getenv("PACFIX_VAL_EXE");
-  covdir = getenv("PACFIX_COV_DIR");
-  tmpfile = alloc_printf((crashed == 1 ? "%s/__valuation_file_%llu" : "%s/__valuation_file_noncrash_%llu"), covdir, (crashed == 1 ? total_saved_crashes : total_saved_positives));
-  tmpfile_env = alloc_printf("PACFIX_FILENAME=%s", tmpfile);
-
-  // Remove covdir + "/__tmp_file" (It might not exist, but that's okay)
-  chmod(tmpfile,0777);
-  u8 error_code = remove(tmpfile);
-  write_to_testcase(mem, len);
-  tmp_argv1 = argv[0];
-  argv[0] = valexe;
-  fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
-  argv[0] = tmp_argv1;
-  ck_free(tmpfile_env);
-
-  if (access(tmpfile, F_OK) != 0) {
-    ck_free(tmpfile);
-    return 0;
-  }
-
-  u32 hash = hash_file(tmpfile);
-  // Check if the hash is already in the hashmap
-  struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
-  if (kvp) {
-    remove(tmpfile);
-    ck_free(tmpfile);
-    return 0;
-  }
-  u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
-                                 crashed == 1 ? total_saved_crashes : total_saved_positives);
-  hashmap_insert(unique_mem_hashmap, hash, target_file);
-  LOGF("[pacfix] [mem] [%s] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos",
-       crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
-
-  if (crashed == 1) {
-    total_saved_crashes++;
-  } else {
-    total_saved_positives++;
-  }
-  target_file = alloc_printf("%s/%s", out_dir, target_file);
-  rename(tmpfile, target_file);
-  ck_free(tmpfile);
-  ck_free(target_file);
-  return 1;
-
-}
-
-static u8 check_unique_path() {
-  if (!check_covered_target()) return 0;
-  // q->trace_mini = ck_alloc(MAP_SIZE >> 3);
-  // minimize_bits(q->trace_mini, trace_bits);
-  u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
-  struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
-  if (!kvp) {
-    if (not_on_tty) {
-      ACTF("Found unique path %u, checksum %u", queued_paths, checksum);
-    }
-    hashmap_insert(dfg_hashmap, checksum, NULL);
-    update_dfg_count_map(NULL);
-    return 1;
-  }
-  return 0;
-}
 
 /* Check if the result of an execve() during routine fuzzing is interesting,
    save or queue the input test case for further analysis if so. Returns 1 if
@@ -3971,7 +3991,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     has_valid_unique_path = check_unique_path();
   }
 
-  if ((fault == crash_mode) || (use_moo_scheduler && has_valid_unique_path)) {
+  if ((fault == FAULT_CRASH) || (fault == FAULT_NONE) || (use_moo_scheduler && has_valid_unique_path)) {
 
     hnb = has_new_bits(virgin_bits);
     if (hnb) {
