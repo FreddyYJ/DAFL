@@ -3419,7 +3419,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
     /* stop_soon is set by the handler for Ctrl+C. When it's pressed,
        we want to bail out quickly. */
 
-    if (stop_soon || fault != crash_mode) goto abort_calibration;
+    if (stop_soon || !(fault == FAULT_CRASH || fault == FAULT_NONE)) goto abort_calibration;
 
     if (!dumb_mode && !stage_cur && !count_bytes(trace_bits)) {
       fault = FAULT_NOINST;
