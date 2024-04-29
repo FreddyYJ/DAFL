@@ -885,6 +885,8 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   q->depth        = cur_depth + 1;
   q->passed_det   = passed_det;
   q->prox_score   = *prox_score;
+  q->prox_score.dfg_dense_map = NULL;
+  q->prox_score.dfg_count_map = NULL;
   q->entry_id     = queued_paths;
   q->rank         = queue_rank + 1;
 
@@ -4735,6 +4737,14 @@ static void maybe_delete_out_dir(void) {
     ck_free(nfn);
   }
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
+  ck_free(fn);
+
+  fn = alloc_printf("%s/memory/neg", out_dir);
+  if (delete_files(fn, NULL)) goto dir_cleanup_failed;
+  ck_free(fn);
+
+  fn = alloc_printf("%s/memory/pos", out_dir);
+  if (delete_files(fn, NULL)) goto dir_cleanup_failed;
   ck_free(fn);
 
   fn = alloc_printf("%s/memory", out_dir);
