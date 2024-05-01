@@ -1884,6 +1884,7 @@ static struct queue_entry* select_next_entry() {
 
   struct queue_entry* q = NULL;
   if (!use_moo_scheduler) {
+    update_dfg_score(queue_last);
     // Use the default scheduler
     q = queue_cur;
     if (first_unhandled) { // This is set only when a new item was added.
@@ -3229,8 +3230,9 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 covered[100] = "";
   u8 *tmp_argv1 = "";
 
+  SAYF("[pacfix] [cov] [crashed %u] [cov %u]\n", crashed, check_covered_target());
   if (!crashed) return check_covered_target();
-  if (crashed && !check_covered_target()) return 0;
+  // if (crashed && !check_covered_target()) return 0;
 
   u8 fault_tmp;
   u32 line = 0;
@@ -3483,7 +3485,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   // avg_prox_score = total_prox_score / queued_paths;
   // if (min_prox_score > q->prox_score) min_prox_score = q->prox_score;
   // if (max_prox_score < q->prox_score) max_prox_score = q->prox_score;
-  update_dfg_score(q);
+  // update_dfg_score(q);
   update_dfg_count_map(q);
 
   update_bitmap_score(q);
