@@ -3230,7 +3230,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 covered[100] = "";
   u8 *tmp_argv1 = "";
 
-  SAYF("[pacfix] [cov] [crashed %u] [cov %u]\n", crashed, check_covered_target());
+  // SAYF("[pacfix] [cov] [crashed %u] [cov %u]\n", crashed, check_covered_target());
   if (!crashed) return check_covered_target();
   // if (crashed && !check_covered_target()) return 0;
 
@@ -8944,8 +8944,10 @@ int main(int argc, char** argv) {
     case 's':    /* Parameter to set scheduler */
       if (optarg[0] == 'm') {
         use_moo_scheduler = 1;
+        proximity_score_allowance = 0;
       } else if (optarg[0] == 'd') {
         use_moo_scheduler = 0;
+        proximity_score_reduction = 0;
       } else {
         use_moo_scheduler = 1;
       }

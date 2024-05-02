@@ -70,7 +70,7 @@ afl-as: afl-as.c afl-as.h $(COMM_HDR) | test_x86
 	ln -sf afl-as as
 
 afl-fuzz: afl-fuzz.c afl-fuzz.h $(COMM_HDR) | test_x86
-	$(CC) $(CFLAGS) -g -O0 $@.c -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) -g -O0 -fsanitize=address $@.c -o $@ $(LDFLAGS)
 
 afl-showmap: afl-showmap.c $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
