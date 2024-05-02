@@ -2033,9 +2033,9 @@ static struct queue_entry* select_next_entry() {
       }
       dominated_queue = recycled_queue;
       q = dominated_queue;
-      struct queue_entry *q_next = q;
       recycled_queue = NULL;
       while (q) {
+        struct queue_entry *q_next = q;
         while (q_next) {
           update_ranks(q, q_next);
           q_next = q_next->next_moo;
