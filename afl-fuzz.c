@@ -1237,11 +1237,11 @@ static void update_dfg_count_map(struct queue_entry *q) {
 
   if (is_unique) {
     unique_dafl_input++;
-    LOGF("[q] [uniq] [id %u] [orig %llu] [adj %.4f] [cov %u] [cnt %u]\n",
-            q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered, unique_dafl_input);
+    LOGF("[q] [uniq] [seed %u] [id %u] [orig %llu] [adj %.4f] [cov %u] [cnt %u]\n",
+            queue_cur->entry_id, q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered, unique_dafl_input);
   } else {
-    LOGF("[q] [non-uniq] [id %u] [orig %llu] [adj %.4f] [cov %u]\n",
-            q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered);
+    LOGF("[q] [non-uniq] [seed %u] [id %u] [orig %llu] [adj %.4f] [cov %u]\n",
+           queue_cur->entry_id, q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered);
   }
 
 }
@@ -3357,7 +3357,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
                                  crashed == 1 ? total_saved_crashes : total_saved_positives);
   hashmap_insert(unique_mem_hashmap, hash, target_file);
-  LOGF("[pacfix] [mem] [%s] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos",
+  LOGF("[pacfix] [mem] [%s] [seed %u] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur->entry_id,
        crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
   vertical_is_new_valuation = 1;
@@ -4219,8 +4219,8 @@ keep_as_crash:
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
   if (has_valid_unique_path || save_to_file) {
-    LOGF("[moo] [save] [seed %u] [moo-id %u] [fault %u] [file %s] [mut %s] [time %llu]\n",
-            queue_cur->entry_id, hashmap_size(dfg_hashmap), fault, fn, stage_short, get_cur_time() - start_time);
+    LOGF("[moo] [save] [seed %u] [moo-id %u] [fault %u] [path %u] [val %u] [file %s] [mut %s] [time %llu]\n",
+            queue_cur->entry_id, hashmap_size(dfg_hashmap), fault, has_valid_unique_path, save_to_file, fn, stage_short, get_cur_time() - start_time);
     fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) PFATAL("Unable to create '%s'", fn);
     ck_write(fd, mem, len, fn);
@@ -5938,8 +5938,18 @@ void init_mutation_vertical(void) {
 
 void log_mutator_selection(u32* mutator, double* location, u32 stacking) {
   u32 score = vertical_is_persistent +  4 * vertical_is_interesting + 16 * vertical_is_new_valuation;
+  u32 mut_cnt[OPERATOR_NUM];
+  memset(mut_cnt, 0, sizeof(mut_cnt));
   for (u32 i = 0; i < stacking; i++) {
-    fprintf(moo_vertical_log_file, "v,%u,%u,%.4f\n", score, mutator[i], location[i]);
+    fprintf(moo_vertical_log_file, "v,%u,%u,%u,%u,%.4f\n",
+            vertical_is_persistent, vertical_is_interesting, vertical_is_new_valuation, mutator[i], location[i]);
+    // Update score for mutator
+    u32 mut = mutator[i];
+    if (!mut_cnt[mut]) {
+      mut_cnt[mut] = 1;
+    }
+    // Update score for location
+
   }
 }
 
