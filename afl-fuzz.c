@@ -1238,10 +1238,10 @@ static void update_dfg_count_map(struct queue_entry *q) {
   if (is_unique) {
     unique_dafl_input++;
     LOGF("[q] [uniq] [seed %u] [id %u] [orig %llu] [adj %.4f] [cov %u] [cnt %u]\n",
-            queue_cur->entry_id, q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered, unique_dafl_input);
+         queue_cur ? queue_cur->entry_id : -1, q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered, unique_dafl_input);
   } else {
     LOGF("[q] [non-uniq] [seed %u] [id %u] [orig %llu] [adj %.4f] [cov %u]\n",
-           queue_cur->entry_id, q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered);
+         queue_cur ? queue_cur->entry_id : -1, q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered);
   }
 
 }
@@ -3357,7 +3357,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
                                  crashed == 1 ? total_saved_crashes : total_saved_positives);
   hashmap_insert(unique_mem_hashmap, hash, target_file);
-  LOGF("[pacfix] [mem] [%s] [seed %u] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur->entry_id,
+  LOGF("[pacfix] [mem] [%s] [seed %u] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1,
        crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
   vertical_is_new_valuation = 1;
@@ -4026,10 +4026,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       vertical_is_interesting = 1;
       if (has_valid_unique_path) {
           LOGF("[moo] [uniq] [seed %u] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
-                 queue_cur->entry_id, queued_paths, hashmap_size(dfg_hashmap), prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
+                queue_cur ? queue_cur->entry_id : -1, queued_paths, hashmap_size(dfg_hashmap), prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
       } else {
           LOGF("[moo] [no-uniq] [seed %u] [id %u] [cov %u] [prox %llu] [adj %f] [tgt %u] [mut %s] [time %llu]\n",
-               queue_cur->entry_id, queued_paths, prox_score.covered, prox_score.original, prox_score.adjusted, check_covered_target(), stage_short, get_cur_time() - start_time);
+               queue_cur ? queue_cur->entry_id : -1, queued_paths, prox_score.covered, prox_score.original, prox_score.adjusted, check_covered_target(), stage_short, get_cur_time() - start_time);
       }
 #ifndef SIMPLE_FILES
 
@@ -4067,7 +4067,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       keeping = 1;
     } else if (has_valid_unique_path) {
-      LOGF("[moo] [uniq-skip] [seed %u] [moo-id %u]\n", queue_cur->entry_id, hashmap_size(dfg_hashmap));
+      LOGF("[moo] [uniq-skip] [seed %u] [moo-id %u]\n", queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap));
     }
 
   }
@@ -4220,7 +4220,7 @@ keep_as_crash:
      test case, too. */
   if (has_valid_unique_path || save_to_file) {
     LOGF("[moo] [save] [seed %u] [moo-id %u] [fault %u] [path %u] [val %u] [file %s] [mut %s] [time %llu]\n",
-            queue_cur->entry_id, hashmap_size(dfg_hashmap), fault, has_valid_unique_path, save_to_file, fn, stage_short, get_cur_time() - start_time);
+           queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap), fault, has_valid_unique_path, save_to_file, fn, stage_short, get_cur_time() - start_time);
     fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) PFATAL("Unable to create '%s'", fn);
     ck_write(fd, mem, len, fn);
@@ -4790,6 +4790,10 @@ static void maybe_delete_out_dir(void) {
   ck_free(fn);
 
   fn = alloc_printf("%s/unique_dafl.log", out_dir);
+  if (unlink(fn) && errno != ENOENT) goto dir_cleanup_failed;
+  ck_free(fn);
+
+  fn = alloc_printf("%s/vertical.log", out_dir);
   if (unlink(fn) && errno != ENOENT) goto dir_cleanup_failed;
   ck_free(fn);
 
