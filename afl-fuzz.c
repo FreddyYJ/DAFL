@@ -3210,7 +3210,7 @@ static u8 check_unique_path() {
     return 1;
   }
   // SAYF("[non-unique-path] [id %u] [checksum %u]\n", queued_paths, checksum);
-  vertical_is_persistent = (checksum == queue_cur->dfg_cksum);
+  vertical_is_persistent = queue_cur ? (checksum == queue_cur->dfg_cksum) : 0;
   return 0;
 }
 
@@ -3356,7 +3356,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   }
   u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
                                  crashed == 1 ? total_saved_crashes : total_saved_positives);
-  hashmap_insert(unique_mem_hashmap, hash, target_file);
+  hashmap_insert(unique_mem_hashmap, hash, NULL);
   LOGF("[pacfix] [mem] [%s] [seed %u] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1,
        crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
@@ -3366,10 +3366,11 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
   } else {
     total_saved_positives++;
   }
-  target_file = alloc_printf("%s/%s", out_dir, target_file);
+  u8* target_file_full = alloc_printf("%s/%s", out_dir, target_file);
   rename(tmpfile, target_file);
   ck_free(tmpfile);
   ck_free(target_file);
+  ck_free(target_file_full);
   return 1;
 
 }
