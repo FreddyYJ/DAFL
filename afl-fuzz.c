@@ -880,11 +880,20 @@ static void sorted_insert_to_queue(struct queue_entry* q) {
 }
 
 static void moo_insert_to_queue(struct queue_entry *q) {
-  q->next_moo = newly_added_queue;
-  newly_added_queue = q;
-  // q->next = queue;
-  // queue = q;
-  sorted_insert_to_queue(q);
+  if (!newly_added_queue) {
+    newly_added_queue = q;
+    q->next_moo = NULL;
+    return;
+  }
+  struct queue_entry *q_tail = newly_added_queue;
+  while (q_tail) {
+    if (!q_tail->next_moo) {
+      q_tail->next_moo = q;
+      q->next_moo = NULL;
+      break;
+    }
+    q_tail = q_tail->next_moo;
+  }
 }
 
 /* Append new test case to the queue. */
@@ -902,11 +911,14 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   q->prox_score.dfg_count_map = NULL;
   q->entry_id     = queued_paths;
   q->rank         = queue_rank + 1;
+  q->next = NULL;
+  q->next_moo = NULL;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
   if (use_moo_scheduler) moo_insert_to_queue(q);
-  else sorted_insert_to_queue(q);
+
+  sorted_insert_to_queue(q);
 
   queue_last = q;
   queued_paths++;
@@ -1872,7 +1884,7 @@ static void cull_queue(void) {
 
 static s32 check_domiance(struct proximity_score *a, struct proximity_score *b) {
   // Compare two entries based on the proximity score domination
-  // Return 1 if a > b, -1 if a < b
+  // Return 1 if a dominates b, -1 if a is dominated by b
   if (a->original > b->original && a->adjusted > b->adjusted) {
     return 1;
   } else if (a->original < b->original && a->adjusted < b->adjusted) {
@@ -1886,10 +1898,11 @@ static void update_ranks(struct queue_entry *a, struct queue_entry *b) {
   struct proximity_score *prox_score_b = &b->prox_score;
   // Compare two entries based on the proximity score domination
   s32 dominance = check_domiance(prox_score_a, prox_score_b);
+  // LOGF("[rank] [a %u] [ar %d] [b %u] [br %d] [dom %d]\n", a->entry_id, a->rank, b->entry_id, b->rank, dominance);
   if (dominance > 0) {
-    a->rank++;
-  } else if (dominance < 0) {
     b->rank++;
+  } else if (dominance < 0) {
+    a->rank++;
   }
 }
 
@@ -1922,54 +1935,74 @@ static struct queue_entry* select_next_entry() {
     // First, update the dominated queue with the new entries
     moo_cycle++;
     struct vector *new_entries = list_to_vector(newly_added_queue);
-    q = vector_get(new_entries, vector_size(new_entries) - 1);
-    if (q) {
-      q->next_moo = dominated_queue;
-      dominated_queue = vector_get(new_entries, 0);
-      newly_added_queue = NULL;
-    }
-    q = dominated_queue;
-    for (u32 i = 0; i < vector_size(new_entries); i++) {
-      while (q) {
-        update_ranks(q, vector_get(new_entries, i));
-        q = q->next_moo;
+    u32 new_entries_size = vector_size(new_entries);
+    newly_added_queue = NULL;
+    struct vector *dominated_vec = list_to_vector(dominated_queue);
+    u32 dominated_size = vector_size(dominated_vec);
+    LOGF("[sche] [moo-size] [new %u] [dom %u]\n", new_entries_size, dominated_size);
+    // Update the ranks
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *a = vector_get(new_entries, i);
+      for (u32 j = i + 1; j < new_entries_size; j++) {
+        struct queue_entry *b = vector_get(new_entries, j);
+        update_ranks(a, b);
       }
     }
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *a = vector_get(new_entries, i);
+      for (u32 j = i + 1; j < dominated_size; j++) {
+        struct queue_entry *b = vector_get(dominated_vec, j);
+        update_ranks(a, b);
+      }
+    }
+    // Add new entries to the dominated queue
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *nq = vector_get(new_entries, i);
+      push_back(dominated_vec, nq);
+    }
+    dominated_size = vector_size(dominated_vec);
     vector_free(new_entries);
     // If the dominated queue is empty, select from the recycled queue
-    if (!dominated_queue) {
-      LOGF("[sche] [moo] [recycled]\n");
-      queue_rank = -1;
-      q = recycled_queue;
-      while (q) {
-        q->rank = 0;
-        q = q->next_moo;
+    if (dominated_size == 0) {
+      vector_free(dominated_vec);
+      struct vector *recycled_vec = list_to_vector(recycled_queue);
+      LOGF("[sche] [moo] [recycled %u]\n", vector_size(recycled_vec));
+      for (u32 i = 0; i < vector_size(recycled_vec); i++) {
+        struct queue_entry *entry = vector_get(recycled_vec, i);
+        entry->rank = 0;
       }
-      dominated_queue = recycled_queue;
-      q = dominated_queue;
       recycled_queue = NULL;
-      while (q) {
-        struct queue_entry *q_next = q;
-        while (q_next) {
-          update_ranks(q, q_next);
-          q_next = q_next->next_moo;
+      for (u32 i = 0; i < vector_size(recycled_vec); i++) {
+        struct queue_entry *a = vector_get(recycled_vec, i);
+        for (u32 j = i + 1; j < vector_size(recycled_vec); j++) {
+          struct queue_entry *b = vector_get(recycled_vec, j);
+          update_ranks(a, b);
         }
-        q = q->next_moo;
       }
+      dominated_queue = vector_to_list(recycled_vec);
+      dominated_vec = recycled_vec;
     }
     // Construct the pareto frontier queue from the dominated queue
-    queue_rank++;
-    struct vector *ranked_vec = list_to_vector(dominated_queue);
-    for (u32 i = 0; i < vector_size(ranked_vec); i++) {
-      struct queue_entry *entry = vector_get(ranked_vec, i);
+    queue_rank = -1;
+    for (u32 i = 0; i < vector_size(dominated_vec); i++) {
+      struct queue_entry *entry = vector_get(dominated_vec, i);
+      if (queue_rank < 0) queue_rank = entry->rank;
+      queue_rank = MIN(queue_rank, entry->rank);
+    }
+    struct vector *pareto_frontier_vec = vector_create();
+    for (u32 i = 0; i < vector_size(dominated_vec); i++) {
+      struct queue_entry *entry = vector_get(dominated_vec, i);
+      LOGF("[sche] [pareto] [id %u] [rank %d] [min %u]\n", entry->entry_id, entry->rank, queue_rank);
       if (entry->rank == queue_rank) {
-        entry->next_moo = pareto_frontier_queue;
-        pareto_frontier_queue = entry;
-        vector_set(ranked_vec, i, NULL);
+        vector_set(dominated_vec, i, NULL);
+        push_back(pareto_frontier_vec, entry);
       }
     }
-    dominated_queue = vector_to_list(ranked_vec);
-    vector_free(ranked_vec);
+    LOGF("[sche] [frontier] [size %u]\n", vector_size(pareto_frontier_vec));
+    dominated_queue = vector_to_list(dominated_vec);
+    vector_free(dominated_vec);
+    pareto_frontier_queue = vector_to_list(pareto_frontier_vec);
+    vector_free(pareto_frontier_vec);
   }
   // Pop from pareto_frontier_queue, push to recycled_queue
   struct queue_entry *prev = queue_cur;
@@ -4010,8 +4043,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   if (dfg_node_info_map) {
     has_valid_unique_path = check_unique_path();
   }
-
-  if ((fault == FAULT_CRASH) || (fault == FAULT_NONE) || (use_moo_scheduler && has_valid_unique_path)) {
+  //  || (use_moo_scheduler && has_valid_unique_path)
+  if ((fault == FAULT_CRASH) || (fault == FAULT_NONE)) {
 
     hnb = has_new_bits(virgin_bits);
     if (hnb) {
@@ -7538,7 +7571,6 @@ static u8 fuzz_one_vertical(char** argv) {
     log_mutator_selection(mut_cnt, loc_cnt, use_stacking);
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
-
     if (temp_len < len) out_buf = ck_realloc(out_buf, len);
     temp_len = len;
     memcpy(out_buf, in_buf, len);

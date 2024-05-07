@@ -97,9 +97,10 @@ void vector_free(struct vector* vec) {
 
 struct vector *list_to_vector(struct queue_entry *list) {
   struct vector *vec = vector_create();
-  while (list != NULL) {
-    push_back(vec, list);
-    list = list->next_moo;
+  struct queue_entry *q = list;
+  while (q != NULL) {
+    push_back(vec, q);
+    q = q->next_moo;
   }
   return vec;
 }
