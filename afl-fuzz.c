@@ -3367,7 +3367,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
     total_saved_positives++;
   }
   u8* target_file_full = alloc_printf("%s/%s", out_dir, target_file);
-  rename(tmpfile, target_file);
+  rename(tmpfile, target_file_full);
   ck_free(tmpfile);
   ck_free(target_file);
   ck_free(target_file_full);
@@ -9405,10 +9405,11 @@ abandon_entry:
 
 static u8 fuzz_one(char **argv) {
   int key_val_lv = 0;
-  if (use_vertical_navigation)
-    key_val_lv = fuzz_one_vertical(argv);
-  else
-    key_val_lv = fuzz_one_original(argv);
+  key_val_lv = fuzz_one_vertical(argv);
+//  if (use_vertical_navigation)
+//    key_val_lv = fuzz_one_vertical(argv);
+//  else
+//    key_val_lv = fuzz_one_original(argv);
 
   return key_val_lv;
 }
