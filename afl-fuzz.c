@@ -4042,6 +4042,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   if (dfg_node_info_map) {
     has_valid_unique_path = check_unique_path();
+    if (has_valid_unique_path) {
+      LOGF("[moo] [uniq-path] [seed %u] [moo-id %u]\n", queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap));
+    }
   }
   //  || (use_moo_scheduler && has_valid_unique_path)
   if ((fault == FAULT_CRASH) || (fault == FAULT_NONE)) {
@@ -4100,8 +4103,6 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       close(fd);
 
       keeping = 1;
-    } else if (has_valid_unique_path) {
-      LOGF("[moo] [uniq-skip] [seed %u] [moo-id %u]\n", queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap));
     }
 
   }
