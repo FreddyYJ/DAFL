@@ -105,6 +105,8 @@ static u8 use_vertical_navigation = 0; // Option given by -v
 static u8 vertical_is_persistent = 0;
 static u8 vertical_is_interesting = 0;
 static u8 vertical_is_new_valuation = 0;
+
+static struct interval_tree *vertical_tree = 0;
 // End vertical navigation
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
@@ -407,7 +409,7 @@ static u64 get_cur_time_us(void) {
 /* Generate a random number (from 0 to limit - 1). This may
    have slight bias. */
 
-static inline u32 UR(u32 limit) {
+inline u32 UR(u32 limit) {
 
   if (unlikely(!rand_cnt--)) {
 
@@ -5988,7 +5990,7 @@ void log_mutator_selection(u32* mutator, double* location, u32 stacking) {
       mut_cnt[mut] = 1;
     }
     // Update score for location
-
+    interval_tree_insert(vertical_tree, quantize_location(location[i]), score);
   }
 }
 
@@ -7167,6 +7169,7 @@ static u8 fuzz_one_vertical(char** argv) {
   for (stage_cur = 0; stage_cur < stage_max; stage_cur++) {
 
     u32 use_stacking = 1 << (1 + UR(HAVOC_STACK_POW2));
+    u32 unused_count = 0;
 
     stage_cur_val = use_stacking;
 
@@ -7178,6 +7181,7 @@ static u8 fuzz_one_vertical(char** argv) {
       u32 location = 0;
       u32 mutator = select_mutator_vertical(extras_cnt + a_extras_cnt);
       double rel_loc = 0.0;
+      u8 is_used = 1;
 
       switch (mutator) {
 
@@ -7199,7 +7203,10 @@ static u8 fuzz_one_vertical(char** argv) {
 
           /* Set word to interesting value, randomly choosing endian. */
 
-          if (temp_len < 2) break;
+          if (temp_len < 2) {
+            is_used = 0;
+            break;
+          }
 
           location = select_location_vertical(temp_len - 1, &rel_loc);
 
@@ -7221,7 +7228,10 @@ static u8 fuzz_one_vertical(char** argv) {
 
           /* Set dword to interesting value, randomly choosing endian. */
 
-          if (temp_len < 4) break;
+          if (temp_len < 4) {
+            is_used = 0;
+            break;
+          }
 
           location = select_location_vertical(temp_len - 3, &rel_loc);
 
@@ -7257,7 +7267,10 @@ static u8 fuzz_one_vertical(char** argv) {
 
           /* Randomly subtract from word, random endian. */
 
-          if (temp_len < 2) break;
+          if (temp_len < 2) {
+            is_used = 0;
+            break;
+          }
 
           location = select_location_vertical(temp_len - 1, &rel_loc);
 
@@ -7280,7 +7293,10 @@ static u8 fuzz_one_vertical(char** argv) {
 
           /* Randomly add to word, random endian. */
 
-          if (temp_len < 2) break;
+          if (temp_len < 2) {
+            is_used = 0;
+            break;
+          }
 
           location = select_location_vertical(temp_len - 1, &rel_loc);
 
@@ -7306,7 +7322,10 @@ static u8 fuzz_one_vertical(char** argv) {
 
           /* Randomly subtract from dword, random endian. */
 
-          if (temp_len < 4) break;
+          if (temp_len < 4) {
+            is_used = 0;
+            break;
+          }
 
           location = select_location_vertical(temp_len - 3, &rel_loc);
 
@@ -7332,7 +7351,10 @@ static u8 fuzz_one_vertical(char** argv) {
 
           /* Randomly add to dword, random endian. */
 
-          if (temp_len < 4) break;
+          if (temp_len < 4) {
+            is_used = 0;
+            break;
+          }
 
           location = select_location_vertical(temp_len - 3, &rel_loc);
 
@@ -7371,7 +7393,10 @@ static u8 fuzz_one_vertical(char** argv) {
 
           u32 del_from, del_len;
 
-          if (temp_len < 2) break;
+          if (temp_len < 2) {
+            is_used = 0;
+            break;
+          }
 
           /* Don't delete too much. */
 
@@ -7445,7 +7470,10 @@ static u8 fuzz_one_vertical(char** argv) {
 
           u32 copy_from, copy_to, copy_len;
 
-          if (temp_len < 2) break;
+          if (temp_len < 2) {
+            is_used = 0;
+            break;
+          }
 
           copy_len  = choose_block_len(temp_len - 1);
 
@@ -7480,7 +7508,10 @@ static u8 fuzz_one_vertical(char** argv) {
             u32 extra_len = a_extras[use_extra].len;
             u32 insert_at;
 
-            if (extra_len > temp_len) break;
+            if (extra_len > temp_len) {
+              is_used = 0;
+              break;
+            }
 
             insert_at = UR(temp_len - extra_len + 1);
             memcpy(out_buf + insert_at, a_extras[use_extra].data, extra_len);
@@ -7493,7 +7524,10 @@ static u8 fuzz_one_vertical(char** argv) {
             u32 extra_len = extras[use_extra].len;
             u32 insert_at;
 
-            if (extra_len > temp_len) break;
+            if (extra_len > temp_len) {
+              is_used = 0;
+              break;
+            }
 
             insert_at = location = select_location_vertical(temp_len - extra_len + 1, &rel_loc);
             memcpy(out_buf + insert_at, extras[use_extra].data, extra_len);
@@ -7517,7 +7551,10 @@ static u8 fuzz_one_vertical(char** argv) {
             use_extra = UR(a_extras_cnt);
             extra_len = a_extras[use_extra].len;
 
-            if (temp_len + extra_len >= MAX_FILE) break;
+            if (temp_len + extra_len >= MAX_FILE) {
+              is_used = 0;
+              break;
+            }
 
             new_buf = ck_alloc_nozero(temp_len + extra_len);
 
@@ -7532,7 +7569,10 @@ static u8 fuzz_one_vertical(char** argv) {
             use_extra = UR(extras_cnt);
             extra_len = extras[use_extra].len;
 
-            if (temp_len + extra_len >= MAX_FILE) break;
+            if (temp_len + extra_len >= MAX_FILE) {
+              is_used = 0;
+              break;
+            }
 
             new_buf = ck_alloc_nozero(temp_len + extra_len);
 
@@ -7559,8 +7599,12 @@ static u8 fuzz_one_vertical(char** argv) {
       }
 
       // Log this mutation selection
-      mut_cnt[i] = mutator;
-      loc_cnt[i] = rel_loc;
+      if (is_used) {
+        mut_cnt[i - unused_count] = mutator;
+        loc_cnt[i - unused_count] = rel_loc;
+      } else {
+        unused_count++;
+      }
 
     }
 
@@ -7569,7 +7613,7 @@ static u8 fuzz_one_vertical(char** argv) {
     if (common_fuzz_stuff(argv, out_buf, temp_len))
       goto abandon_entry;
 
-    log_mutator_selection(mut_cnt, loc_cnt, use_stacking);
+    log_mutator_selection(mut_cnt, loc_cnt, use_stacking - unused_count);
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
     if (temp_len < len) out_buf = ck_realloc(out_buf, len);
@@ -10564,6 +10608,7 @@ void init_vertical_navigation() { // initialize vertical navigation
   memset(moo_operator_persistent, 0, sizeof(moo_operator_persistent));
   memset(moo_operator_val, 0, sizeof(moo_operator_val));
   memset(moo_operator_total, 0, sizeof(moo_operator_total));
+  vertical_tree = interval_tree_create();
 
 }
 
@@ -10813,7 +10858,7 @@ int main(int argc, char** argv) {
       break;
 
     case 'v':    /* Vertical navigation mode */
-      init_vertical_navigation();
+      use_vertical_navigation = 1;
       break;
 
     default:
@@ -10826,6 +10871,7 @@ int main(int argc, char** argv) {
 
   setup_signal_handlers();
   check_asan_opts();
+  init_vertical_navigation();
 
   if (sync_id) fix_up_sync();
 
