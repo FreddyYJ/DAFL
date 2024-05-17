@@ -106,6 +106,8 @@ static u8 vertical_is_persistent = 0;
 static u8 vertical_is_interesting = 0;
 static u8 vertical_is_new_valuation = 0;
 
+static u8 vertical_use_full = 0;
+
 static struct interval_tree *vertical_tree = 0;
 // End vertical navigation
 
@@ -409,7 +411,7 @@ static u64 get_cur_time_us(void) {
 /* Generate a random number (from 0 to limit - 1). This may
    have slight bias. */
 
-inline u32 UR(u32 limit) {
+u32 UR(u32 limit) {
 
   if (unlikely(!rand_cnt--)) {
 
@@ -831,6 +833,149 @@ static s32 compare_proximity_score(struct proximity_score *a, struct proximity_s
   if (a->adjusted > b->adjusted) return 1;
   return 0;
 }
+
+// Implementation of interval tree
+
+struct interval_node *interval_node_create(u32 start, u32 end) {
+  struct interval_node *node = ck_alloc(sizeof(struct interval_node));
+  if (node == NULL) {
+    printf("Memory allocation failed.\n");
+    exit(EXIT_FAILURE);
+  }
+  node->start = start;
+  node->end = end;
+  node->count = 0;
+  node->score = 0;
+  node->left = NULL;
+  node->right = NULL;
+  if (end > start) {
+    u32 mid = (start + end) / 2;
+    node->left = interval_node_create(start, mid);
+    node->right = interval_node_create(mid + 1, end);
+  }
+  return node;
+}
+
+void interval_node_free(struct interval_node *node) {
+  if (node == NULL) {
+    return;
+  }
+  interval_node_free(node->left);
+  interval_node_free(node->right);
+  ck_free(node);
+}
+
+double interval_tree_query(struct interval_tree *tree, struct interval_node *node) {
+  u64 total_count = 0;
+  u64 total_score = 0;
+  for (u32 i = node->start; i <= node->end; i++) {
+    total_count += tree->count[i];
+    total_score += tree->score[i];
+  }
+  node->count = total_count;
+  node->score = total_score;
+  if (total_count == 0) return 0.0;
+  return (double)total_score / (double)total_count;
+}
+
+double interval_node_ratio(struct interval_node *node) {
+  if (!node) return 0.0;
+  if (node->count == 0) return 0.0;
+  return (double)(node->score) / (double)(node->count);
+}
+
+u8 should_split(double a, double b) {
+  if (a == 0.0 || b == 0.0) return 0;
+  if (a < b) {
+    return (b / a) > 1.5;
+  } else {
+    return (a / b) > 1.5;
+  }
+}
+
+struct interval_node *interval_node_insert(struct interval_tree *tree, struct interval_node *node, u32 key, u32 value) {
+  if (!node) return node;
+  node->count++;
+  node->score += value;
+  if (node->end - node->start < 2) {
+    return node;
+  }
+  u32 mid = (node->start + node->end) / 2;
+  if (node->left && node->right) {
+    if (key <= mid) {
+      interval_node_insert(tree, node->left, key, value);
+    } else {
+      interval_node_insert(tree, node->right, key, value);
+    }
+  }
+}
+
+struct interval_tree *interval_tree_create() {
+  struct interval_tree *tree = ck_alloc(sizeof(struct interval_tree));
+  if (tree == NULL) {
+    printf("Memory allocation failed.\n");
+    exit(EXIT_FAILURE);
+  }
+  tree->root = interval_node_create(0, INTERVAL_SIZE - 1);
+  return tree;
+}
+
+void interval_tree_free(struct interval_tree *tree) {
+  interval_node_free(tree->root);
+  ck_free(tree);
+}
+
+void interval_tree_insert(struct interval_tree *tree, u32 key, u32 value) {
+  if (!tree) return;
+  if (key >= INTERVAL_SIZE) {
+    fprintf(stderr, "Key out of range: %u\n", key);
+    return;
+  }
+  tree->count[key]++;
+  tree->score[key] += value;
+  interval_node_insert(tree, tree->root, key, value);
+}
+
+u32 interval_node_select(struct interval_node *node) {
+  // 3 Options: select this / left / right node
+  if (!node) return UR(INTERVAL_SIZE);
+  // 1. Select this node
+  u32 sel_in_node = node->start + UR(node->end - node->start + 1);
+  if ((!node->left && !node->right)) {
+    return sel_in_node;
+  }
+  double left_ratio = interval_node_ratio(node->left);
+  double right_ratio = interval_node_ratio(node->right);
+  u32 min_size = (node->end - node->start + 1) / 2;
+  if (vertical_use_full) {
+    min_size = MAX(min_size / 2, 1);
+  } else {
+    min_size = 1;
+  }
+  double total = left_ratio + right_ratio;
+  if ((total == 0.0) || ((node->left->count < min_size) || (node->right->count < min_size))) {
+    return sel_in_node;
+  }
+  // 2. Select left vs. right
+  double min_prob = 0.1;
+  double left_prob = left_ratio / total;
+  left_prob = MAX(min_prob, left_ratio / total);
+  left_prob = MIN(1.0 - min_prob, left_prob);
+  u32 r = UR(10000);
+  if (r < left_prob * 10000) {
+    return interval_node_select(node->left);
+  } else {
+    return interval_node_select(node->right);
+  }
+}
+
+u32 interval_tree_select(struct interval_tree *tree) {
+  if (!tree || tree->count < INTERVAL_SIZE) {
+    return UR(INTERVAL_SIZE);
+  }
+  return interval_node_select(tree->root);
+}
+// End of interval tree
 
 /* Insert a test case to the queue, preserving the sorted order based on the
  * proximity score. Updates global variables 'queue', 'shortcut_per_100', and
@@ -5962,10 +6107,28 @@ u32 select_mutator_vertical(u32 extras) {
   return mutator;
 }
 
+u32 convert_to_actual_location(u32 max, u32 sel) {
+  u32 min_error = ((max / INTERVAL_SIZE) + 1) / 2;
+  min_error = MAX(min_error, 1);
+  double ratio = (double)sel / (double)INTERVAL_SIZE;
+  double loc = ratio * (double)max;
+  u32 loc_u32 = (u32)loc;
+  // Select +- min_error location
+  u32 minus = min_error;
+  u32 plus = UR(2 * min_error + 1);
+  if (loc_u32 < min_error) minus = loc_u32 - 1;
+  u32 loc_final = loc_u32 - minus + plus;
+  if (loc_final > max - 1) loc_final = max - 1;
+  return loc_final;
+}
+
 u32 select_location_vertical(u32 max, double *rel) {
   u32 result = 0;
   if (max) {
-    result = UR(max);
+    if (use_vertical_navigation)
+      result = convert_to_actual_location(max, interval_tree_select(vertical_tree));
+    else
+      result = UR(max);
     *rel = (double) result / (double) max;
   }
   return result;
@@ -5978,7 +6141,8 @@ void init_mutation_vertical(void) {
 }
 
 void log_mutator_selection(u32* mutator, double* location, u32 stacking) {
-  u32 score = vertical_is_persistent +  4 * vertical_is_interesting + 16 * vertical_is_new_valuation;
+  // 4 * vertical_is_interesting
+  u32 score = vertical_is_persistent + 16 * vertical_is_new_valuation;
   u32 mut_cnt[OPERATOR_NUM];
   memset(mut_cnt, 0, sizeof(mut_cnt));
   for (u32 i = 0; i < stacking; i++) {
@@ -7169,7 +7333,7 @@ static u8 fuzz_one_vertical(char** argv) {
   for (stage_cur = 0; stage_cur < stage_max; stage_cur++) {
 
     u32 use_stacking = 1 << (1 + UR(HAVOC_STACK_POW2));
-    u32 unused_count = 0;
+    u32 loc_count = 0;
 
     stage_cur_val = use_stacking;
 
@@ -7600,10 +7764,9 @@ static u8 fuzz_one_vertical(char** argv) {
 
       // Log this mutation selection
       if (is_used) {
-        mut_cnt[i - unused_count] = mutator;
-        loc_cnt[i - unused_count] = rel_loc;
-      } else {
-        unused_count++;
+        mut_cnt[loc_count] = mutator;
+        loc_cnt[loc_count] = rel_loc;
+        loc_count++;
       }
 
     }
@@ -7613,7 +7776,7 @@ static u8 fuzz_one_vertical(char** argv) {
     if (common_fuzz_stuff(argv, out_buf, temp_len))
       goto abandon_entry;
 
-    log_mutator_selection(mut_cnt, loc_cnt, use_stacking - unused_count);
+    log_mutator_selection(mut_cnt, loc_cnt, loc_count);
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
     if (temp_len < len) out_buf = ck_realloc(out_buf, len);
@@ -10604,7 +10767,6 @@ static void save_cmdline(u32 argc, char** argv) {
 
 void init_vertical_navigation() { // initialize vertical navigation
 
-  use_vertical_navigation = 1;
   memset(moo_operator_persistent, 0, sizeof(moo_operator_persistent));
   memset(moo_operator_val, 0, sizeof(moo_operator_val));
   memset(moo_operator_total, 0, sizeof(moo_operator_total));
@@ -10638,7 +10800,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:v")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:vz:")) > 0)
 
     switch (opt) {
 
@@ -10859,6 +11021,10 @@ int main(int argc, char** argv) {
 
     case 'v':    /* Vertical navigation mode */
       use_vertical_navigation = 1;
+      break;
+
+    case 'z':
+      vertical_use_full = 1;
       break;
 
     default:

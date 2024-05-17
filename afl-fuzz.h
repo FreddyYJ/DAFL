@@ -60,17 +60,12 @@ struct queue_entry {
 
 };
 
-/* Generate a random number (from 0 to limit - 1). This may
-   have slight bias. */
-inline u32 UR(u32 limit);
-
 u32 quantize_location(double loc) {
   return (u32)(loc * INTERVAL_SIZE);
 }
 
 // Binary tree
 struct interval_node {
-  u8 split;
   u32 start;
   u32 end;
   u64 count;
@@ -85,137 +80,25 @@ struct interval_tree {
   struct interval_node *root;
 };
 
-struct interval_node *interval_node_create(u32 start, u32 end) {
-  struct interval_node *node = ck_alloc(sizeof(struct interval_node));
-  if (node == NULL) {
-    printf("Memory allocation failed.\n");
-    exit(EXIT_FAILURE);
-  }
-  node->split = 0;
-  node->start = start;
-  node->end = end;
-  node->count = 0;
-  node->score = 0;
-  node->left = NULL;
-  node->right = NULL;
-  if (end > start) {
-    u32 mid = (start + end) / 2;
-    node->left = interval_node_create(start, mid);
-    node->right = interval_node_create(mid + 1, end);
-  }
-  return node;
-}
+struct interval_node *interval_node_create(u32 start, u32 end);
 
-void interval_node_free(struct interval_node *node) {
-  if (node == NULL) {
-    return;
-  }
-  interval_node_free(node->left);
-  interval_node_free(node->right);
-  ck_free(node);
-}
+void interval_node_free(struct interval_node *node);
 
-double interval_tree_query(struct interval_tree *tree, struct interval_node *node) {
-  u64 total_count = 0;
-  u64 total_score = 0;
-  for (u32 i = node->start; i <= node->end; i++) {
-    total_count += tree->count[i];
-    total_score += tree->score[i];
-  }
-  node->count = total_count;
-  node->score = total_score;
-  if (total_count == 0) return 0.0;
-  return (double)total_score / (double)total_count;
-}
+double interval_tree_query(struct interval_tree *tree, struct interval_node *node);
 
-double interval_node_ratio(struct interval_node *node) {
-  if (!node) return 0.0;
-  if (node->count == 0) return 0.0;
-  return (double)(node->score) / (double)(node->count);
-}
+double interval_node_ratio(struct interval_node *node);
 
-u8 should_split(double a, double b) {
-  if (a == 0.0 || b == 0.0) return 0;
-  if (a < b) {
-    return (b / a) > 1.5;
-  } else {
-    return (a / b) > 1.5;
-  }
-}
+struct interval_node *interval_node_insert(struct interval_tree *tree, struct interval_node *node, u32 key, u32 value);
 
-void interval_node_split(struct interval_tree *tree, struct interval_node *node) {
-  node->split = 0;
-  if ((node->end - node->start) < 2) {
-    return;
-  }
-  u32 mid = (node->start + node->end) / 2;
-  node->left = interval_node_create(node->start, mid, 1);
-  node->right = interval_node_create(mid + 1, node->end, 1);
-  interval_tree_query(tree, node->left);
-  interval_tree_query(tree, node->right);
-}
+struct interval_tree *interval_tree_create();
 
-struct interval_node *interval_node_insert(struct interval_tree *tree, struct interval_node *node, u32 key, u32 value) {
-  if (!node) return node;
-  node->count++;
-  node->score += value;
-  if (node->end - node->start < 2) {
-    return node;
-  }
-  u32 mid = (node->start + node->end) / 2;
-  if (node->left && node->right) {
-    if (key <= mid) {
-      interval_node_insert(tree, node->left, key, value);
-    } else {
-      interval_node_insert(tree, node->right, key, value);
-    }
-    if (!node->split) {
-      double left_ratio = interval_node_ratio(node->left);
-      double right_ratio = interval_node_ratio(node->right);
-      if (should_split(left_ratio, right_ratio)) {
-        node->split = 1;
-        if (left_ratio > right_ratio) {
-          if (key <= mid) interval_node_insert(tree, node->left, key, value);
-        } else {
-          if (key > mid) interval_node_insert(tree, node->right, key, value);
-        }
-      }
-    }
-  }
-}
+void interval_tree_free(struct interval_tree *tree);
 
-struct interval_tree *interval_tree_create() {
-  struct interval_tree *tree = ck_alloc(sizeof(struct interval_tree));
-  if (tree == NULL) {
-    printf("Memory allocation failed.\n");
-    exit(EXIT_FAILURE);
-  }
-  tree->root = interval_node_create(0, INTERVAL_SIZE - 1, 1);
-  return tree;
-}
+void interval_tree_insert(struct interval_tree *tree, u32 key, u32 value);
 
-void interval_tree_free(struct interval_tree *tree) {
-  interval_node_free(tree->root);
-  ck_free(tree);
-}
+u32 interval_node_select(struct interval_node *node);
 
-void interval_tree_insert(struct interval_tree *tree, u32 key, u32 value) {
-  if (!tree) return;
-  if (key >= INTERVAL_SIZE) {
-    fprintf(stderr, "Key out of range: %u\n", key);
-    return;
-  }
-  tree->count[key]++;
-  tree->score[key] += value;
-  interval_node_insert(tree, tree->root, key, value);
-}
-
-u32 interval_tree_select(struct interval_tree *tree) {
-  if (!tree || tree->count < INTERVAL_SIZE) {
-    return UR(INTERVAL_SIZE);
-  }
-
-}
+u32 interval_tree_select(struct interval_tree *tree);
 
 // Define the vector structure
 struct vector {
