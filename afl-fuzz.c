@@ -107,6 +107,8 @@ static u8 vertical_is_interesting = 0;
 static u8 vertical_is_new_valuation = 0;
 
 static u8 vertical_use_full = 0;
+static u8 vertical_experiment = 0;
+static struct hashmap *vertical_hashmap = NULL;
 
 static struct interval_tree *vertical_tree = 0;
 // End vertical navigation
@@ -1359,12 +1361,17 @@ static u8 check_covered_target() {
   return 0;
 }
 
+static u32 get_dfg_checksum() {
+  u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+  return checksum;
+}
+
 static void update_dfg_count_map(struct queue_entry *q) {
 
   if (use_moo_scheduler && q && check_covered_target()) {
 
     if (!q->dfg_cksum) {
-      q->dfg_cksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+      q->dfg_cksum = get_dfg_checksum();
     }
     u32 checksum = q->dfg_cksum;
     struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
@@ -3378,7 +3385,7 @@ static u8 check_unique_path() {
   if (!check_covered_target()) return 0;
   // q->trace_mini = ck_alloc(MAP_SIZE >> 3);
   // minimize_bits(q->trace_mini, trace_bits);
-  u32 checksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+  u32 checksum = get_dfg_checksum();
   // SAYF("[unique-path] [id %u] [checksum %u]\n", queued_paths, checksum);
   struct key_value_pair *kvp = hashmap_get(dfg_hashmap, checksum);
   if (!kvp) {
@@ -3387,6 +3394,10 @@ static u8 check_unique_path() {
     }
     hashmap_insert(dfg_hashmap, checksum, NULL);
     update_dfg_count_map(NULL);
+    if (vertical_experiment) {
+      struct hashmap *local_hashmap = hashmap_create(8);
+      hashmap_insert(vertical_hashmap, checksum, local_hashmap);
+    }
     return 1;
   }
   // SAYF("[non-unique-path] [id %u] [checksum %u]\n", queued_paths, checksum);
@@ -3495,7 +3506,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   }
 }
 
-static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
+static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cksum) {
   u8 *valexe = "";
   u8 *covdir = "";
   u8 *tmpfile = "";
@@ -3528,6 +3539,23 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len) {
 
   u32 hash = hash_file(tmpfile);
   // Check if the hash is already in the hashmap
+  if (vertical_experiment) {
+    struct key_value_pair* local_kvp = hashmap_get(vertical_hashmap, dfg_cksum);
+    if (local_kvp) {
+      struct hashmap *local_valuation_hashmap = local_kvp->value;
+      struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
+      if (local_valuation_kvp) {
+        remove(tmpfile);
+        ck_free(tmpfile);
+        return 0;
+      } else {
+        hashmap_insert(local_valuation_hashmap, hash, NULL);
+        LOGF("[vertical] [valuation] [seed %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
+      }
+    } else {
+      SAYF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
+    }
+  }
   struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
   if (kvp) {
     remove(tmpfile);
@@ -3769,6 +3797,9 @@ static void perform_dry_run(char** argv) {
     close(fd);
 
     res = calibrate_case(argv, q, use_mem, 0, 1);
+    u32 checksum = get_dfg_checksum();
+    q->dfg_cksum = checksum;
+    LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s]\n", q->entry_id, checksum, res, q->fname);
 
     if (stop_soon) return;
 
@@ -3782,13 +3813,14 @@ static void perform_dry_run(char** argv) {
 
         if (q == queue) check_map_coverage();
 
-        if (crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);
+        if (!vertical_experiment && crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);
 
         if (check_coverage(0, argv, use_mem, q->len)) {
+
           if (dfg_node_info_map) {
             check_unique_path();
           }
-          get_valuation(0, argv, use_mem, q->len);
+          get_valuation(0, argv, use_mem, q->len, checksum);
         }
 
         break;
@@ -3838,7 +3870,7 @@ static void perform_dry_run(char** argv) {
           if (dfg_node_info_map) {
             check_unique_path();
           }
-          get_valuation(1, argv, use_mem, q->len);
+          get_valuation(1, argv, use_mem, q->len, checksum);
         }
 
         if (crash_mode) break;
@@ -4186,12 +4218,19 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8 has_valid_unique_path = 0;
   u8 save_to_file = 0;
   struct proximity_score prox_score;
-
+  u32 dfg_checksum = get_dfg_checksum();
   if (dfg_node_info_map) {
     has_valid_unique_path = check_unique_path();
     if (has_valid_unique_path) {
       LOGF("[moo] [uniq-path] [seed %u] [moo-id %u]\n", queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap));
     }
+  }
+  if (vertical_experiment) {
+    if (check_coverage(fault == FAULT_CRASH, argv, mem, len)) {
+      get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum);
+      return 1;
+    }
+    return 0;
   }
   //  || (use_moo_scheduler && has_valid_unique_path)
   if ((fault == FAULT_CRASH) || (fault == FAULT_NONE)) {
@@ -4234,7 +4273,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       }
 
       queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
-      queue_last->dfg_cksum = hash32(dfg_bits, DFG_MAP_SIZE * sizeof(u32), HASH_CONST);
+      queue_last->dfg_cksum = get_dfg_checksum();
+      LOGF("[vertical] [save] [seed %u] [id %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu]\n",
+           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
@@ -4324,7 +4365,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 keep_as_crash:
 
       if (!check_coverage(1, argv, mem, len)) return keeping;
-      save_to_file = get_valuation(1, argv, mem, len);
+      save_to_file = get_valuation(1, argv, mem, len, dfg_checksum);
 
       /* This is handled in a manner roughly similar to timeouts,
          except for slightly different limits and no need to re-run test
@@ -4374,7 +4415,7 @@ keep_as_crash:
       break;
     case FAULT_NONE:
       if (!check_coverage(0, argv, mem, len)) return keeping;
-      save_to_file = get_valuation(0, argv, mem, len);
+      save_to_file = get_valuation(0, argv, mem, len, dfg_checksum);
 
       total_normals++;
 
@@ -10771,6 +10812,7 @@ void init_vertical_navigation() { // initialize vertical navigation
   memset(moo_operator_val, 0, sizeof(moo_operator_val));
   memset(moo_operator_total, 0, sizeof(moo_operator_total));
   vertical_tree = interval_tree_create();
+  vertical_hashmap = hashmap_create(max_queue_size);
 
 }
 
@@ -10800,7 +10842,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:vz:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:vzy")) > 0)
 
     switch (opt) {
 
@@ -11021,6 +11063,10 @@ int main(int argc, char** argv) {
 
     case 'v':    /* Vertical navigation mode */
       use_vertical_navigation = 1;
+      break;
+
+    case 'y':
+      vertical_experiment = 1;
       break;
 
     case 'z':

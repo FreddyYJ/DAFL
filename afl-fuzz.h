@@ -195,6 +195,8 @@ struct hashmap {
   struct key_value_pair** table;
 };
 
+typedef void (*hashmap_iterate_fn)(u32 key, void* value);
+
 struct hashmap* hashmap_create(u32 table_size) {
   struct hashmap* map = ck_alloc(sizeof(struct hashmap));
   if (map == NULL) {
@@ -274,6 +276,16 @@ struct key_value_pair* hashmap_get(struct hashmap* map, u32 key) {
     pair = pair->next;
   }
   return NULL;
+}
+
+void hashmap_iterate(struct hashmap *map, hashmap_iterate_fn func) {
+  for (u32 i = 0; i < map->table_size; i++) {
+    struct key_value_pair *pair = map->table[i];
+    while (pair != NULL) {
+      func(pair->key, pair->value);
+      pair = pair->next;
+    }
+  }
 }
 
 void hashmap_free(struct hashmap* map) {
