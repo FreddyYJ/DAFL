@@ -266,6 +266,26 @@ void hashmap_insert(struct hashmap* map, u32 key, void* value) {
   }
 }
 
+void hashmap_remove(struct hashmap *map, u32 key) {
+  u32 index = hashmap_fit(key, map->table_size);
+  struct key_value_pair* pair = map->table[index];
+  struct key_value_pair* prev = NULL;
+  while (pair != NULL) {
+    if (pair->key == key) {
+      if (!prev) {
+        map->table[index] = pair->next;
+      } else {
+        prev->next = pair->next;
+      }
+      map->size--;
+      ck_free(pair);
+      return;
+    }
+    prev = pair;
+    pair = pair->next;
+  }
+}
+
 struct key_value_pair* hashmap_get(struct hashmap* map, u32 key) {
   u32 index = hashmap_fit(key, map->table_size);
   struct key_value_pair* pair = map->table[index];
@@ -300,5 +320,55 @@ void hashmap_free(struct hashmap* map) {
   ck_free(map->table);
   ck_free(map);
 }
+
+struct vertical_entry {
+  u32 hash;
+  u32 use_count;
+  struct vector *entries;
+  struct vertical_entry *next;
+  struct hashmap *value_map;  // valuation hash
+};
+
+struct vertical_manager {
+  struct hashmap *map; // path -> vertical_entry
+  struct vertical_entry *head;
+  struct vertical_entry *old;
+  struct interval_tree *tree;
+};
+
+struct vertical_entry *vertical_entry_create(u32 hash) {
+  struct vertical_entry *entry = ck_alloc(sizeof(struct vertical_entry));
+  entry->hash = hash;
+  entry->use_count = 0;
+  entry->entries = vector_create();
+  entry->next = NULL;
+  entry->value_map = hashmap_create(8);
+  return entry;
+}
+
+struct vertical_manager *vertical_manager_create() {
+  struct vertical_manager *manager = ck_alloc(sizeof(struct vertical_manager));
+  manager->map = hashmap_create(4096);
+  manager->head = NULL;
+  manager->old = NULL;
+  manager->tree = interval_tree_create();
+  return manager;
+}
+
+void vertical_manager_free(struct vertical_manager *manager) {
+  if (manager == NULL) return;
+  hashmap_free(manager->map);
+  struct vertical_entry *entry = manager->head;
+  while (entry != NULL) {
+    struct vertical_entry *next = entry->next;
+    vector_free(entry->entries);
+    hashmap_free(entry->value_map);
+    ck_free(entry);
+    entry = next;
+  }
+  interval_tree_free(manager->tree);
+  ck_free(manager);
+}
+
 
 #endif //DAFL_AFL_FUZZ_H
