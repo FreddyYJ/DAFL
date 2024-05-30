@@ -2054,25 +2054,73 @@ static void update_ranks(struct queue_entry *a, struct queue_entry *b) {
   }
 }
 
-static struct queue_entry* select_next_entry() {
-
-  struct queue_entry* q = NULL;
-  if (!use_moo_scheduler) {
-    update_dfg_score(queue_last);
-    // Use the default scheduler
-    q = queue_cur;
-    if (first_unhandled) { // This is set only when a new item was added.
-      q = first_unhandled;
-      first_unhandled = NULL;
-    } else { // Proceed to the next unhandled item in the queue.
-      while (q && q->handled_in_cycle) {
-        q = q->next;
-      }
-    }
-    return q;
+struct vertical_entry *vertical_manager_select(struct vertical_manager *manager) {
+  if (manager->head == NULL && manager->old == NULL) return NULL;
+  // Pop from head
+  struct vertical_entry *entry = manager->head;
+  if (entry) {
+    manager->head = entry->next;
+    entry->use_count++;
+  } else {
+    // Pop from old
+    entry = manager->old;
+    manager->old = NULL;
+    manager->head =entry->next;
+    entry->use_count++;
   }
+  return entry;
+}
 
+static u8 moo_remove_from_queue(struct queue_entry **moo_queue, struct queue_entry *removed) {
+  struct queue_entry *q = *moo_queue;
+  struct queue_entry *prev = NULL;
+  while (q) {
+    if (q == removed) {
+      if (prev) {
+        prev->next = q->next;
+      } else {
+        *moo_queue = q->next;
+      }
+      return 1;
+    }
+    prev = q;
+    q = q->next;
+  }
+  return 0;
+}
+
+
+static struct queue_entry* select_next_entry_dafl() {
+  struct queue_entry* q = NULL;
+  update_dfg_score(queue_last);
+  q = queue_cur;
+  if (first_unhandled) { // This is set only when a new item was added.
+    q = first_unhandled;
+    first_unhandled = NULL;
+  } else { // Proceed to the next unhandled item in the queue.
+    while (q && q->handled_in_cycle) {
+      q = q->next;
+    }
+  }
+  return q;
+}
+
+static struct queue_entry* select_next_entry_vertical() {
+  struct vertical_entry *entry = vertical_manager_select(vertical_manager);
+  struct queue_entry* q = NULL;
+  if (!entry) return NULL;
+
+  q = vector_pop_front(entry->entries);
+  if (vector_size(entry->entries) > 0) {
+    // push back to the old queue
+    vertical_manager_insert_to_old(vertical_manager, entry);
+  }
+  return q;
+}
+
+static struct queue_entry* select_next_entry_moo() {
   // Use the MOO scheduler
+  struct queue_entry *q = NULL;
   if (!pareto_frontier_queue) {
     // If the pareto frontier queue is empty, select from the dominated queue
     // First, update the adjusted score
@@ -2160,7 +2208,25 @@ static struct queue_entry* select_next_entry() {
   recycled_queue = q;
   LOGF("[sel] [moo] [prev %u] [cur %u] [rank %d] [time %llu]\n",
        prev->entry_id, q->entry_id, queue_rank, get_cur_time() - start_time);
-  return q;
+}
+
+static struct queue_entry* select_next_entry() {
+
+  // Use the default dafl scheduler
+  if (!use_moo_scheduler) {
+    return select_next_entry_dafl();
+  }
+
+  // Determine whether to use the vertical navigation
+  if (vertical_use_dynamic) {
+    u8 use_vertical = determine_vertical_mode(vertical_manager);
+    if (use_vertical) {
+      return select_next_entry_vertical();
+    }
+  }
+
+  // Else: use moo
+  return select_next_entry_moo();
 
 }
 
@@ -3532,6 +3598,10 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   }
 
   u32 hash = hash_file(tmpfile);
+  struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
+  if (q) {
+    LOGF("[vertical] [entry] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [crash %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(unique_mem_hashmap), crashed, get_cur_time() - start_time);
+  }
   // Check if the hash is already in the hashmap
   if (vertical_experiment || vertical_use_dynamic) {
     struct key_value_pair* local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
@@ -3540,18 +3610,22 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
       struct hashmap *local_valuation_hashmap = local_entry->value_map;
       struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
       if (local_valuation_kvp) {
+        if (q && !local_valuation_kvp->value) {
+          local_valuation_kvp->value = q;
+        }
         remove(tmpfile);
         ck_free(tmpfile);
         return 0;
       } else {
-        hashmap_insert(local_valuation_hashmap, hash, NULL);
-        LOGF("[vertical] [valuation] [seed %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
+        vertical_entry_add(vertical_manager, local_entry, q, kvp);
+        hashmap_insert(local_valuation_hashmap, hash, q);
+        LOGF("[vertical] [valuation] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
       }
     } else {
       SAYF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
     }
   }
-  struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
+
   if (kvp) {
     remove(tmpfile);
     ck_free(tmpfile);
@@ -3560,7 +3634,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
                                  crashed == 1 ? total_saved_crashes : total_saved_positives);
   hashmap_insert(unique_mem_hashmap, hash, NULL);
-  LOGF("[pacfix] [mem] [%s] [seed %d] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1,
+  LOGF("[pacfix] [mem] [%s] [seed %d] [entry %d] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1,
        crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
   vertical_is_new_valuation = 1;

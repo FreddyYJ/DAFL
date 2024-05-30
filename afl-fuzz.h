@@ -134,6 +134,24 @@ void push_back(struct vector* vec, struct queue_entry* element) {
   vec->data[vec->size++] = element;
 }
 
+void vector_push_front(struct vector *vec, struct queue_entry *element) {
+  push_back(vec, element);
+  for (u32 i = vec->size - 1; i > 0; i--) {
+    vec->data[i] = vec->data[i - 1];
+  }
+  vec->data[0] = element;
+}
+
+struct queue_entry * vector_pop_front(struct vector *vec) {
+  if (vec->size == 0) return NULL;
+  struct queue_entry *entry = vec->data[0];
+  for (u32 i = 0; i < vec->size - 1; i++) {
+    vec->data[i] = vec->data[i + 1];
+  }
+  vec->size--;
+  return entry;
+}
+
 void vector_free(struct vector* vec) {
   ck_free(vec->data);
   ck_free(vec);
@@ -346,6 +364,48 @@ struct vertical_entry *vertical_entry_create(u32 hash) {
   return entry;
 }
 
+void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
+  if (!q) return;
+  if (vector_size(entry->entries) == 0) {
+    push_back(entry->entries, q);
+    // This is the first seed for this dug-path
+    // Insert the entry to the queue
+    // If valuation is unique, insert to the front
+    if (!manager->head || !kvp) {
+      entry->next = manager->head;
+      manager->head = entry;
+    } else {
+      // If valuation is not unique, insert to the end
+      struct vertical_entry *ve = manager->head;
+      while (ve->next != NULL) {
+        ve = ve->next;
+      }
+      ve->next = entry;
+    }
+  } else {
+    // If valuation is unique, move to the front
+    if (!kvp) {
+      vector_push_front(entry->entries, q);
+      struct vertical_entry *ve = manager->head;
+      struct vertical_entry *prev = NULL;
+      while (ve != NULL) {
+        if (ve == entry) {
+          if (prev) {
+            prev->next = ve->next;
+            ve->next = manager->head;
+            manager->head = ve;
+          }
+          break;
+        }
+        prev = ve;
+        ve = ve->next;
+      }
+    } else {
+      push_back(entry->entries, q);
+    }
+  }
+}
+
 struct vertical_manager *vertical_manager_create() {
   struct vertical_manager *manager = ck_alloc(sizeof(struct vertical_manager));
   manager->map = hashmap_create(4096);
@@ -355,10 +415,38 @@ struct vertical_manager *vertical_manager_create() {
   return manager;
 }
 
+struct vertical_entry *vertical_manager_select(struct vertical_manager *manager);
+
+u8 determine_vertical_mode(struct vertical_manager *manager) {
+  if (manager->head == NULL && manager->old == NULL) return 0;
+
+  return 0;
+}
+
+void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry) {
+  if (manager->old == NULL) {
+    manager->old = entry;
+  } else {
+    struct vertical_entry *ve = manager->old;
+    while (ve->next != NULL) {
+      ve = ve->next;
+    }
+    ve->next = entry;
+  }
+}
+
 void vertical_manager_free(struct vertical_manager *manager) {
   if (manager == NULL) return;
   hashmap_free(manager->map);
   struct vertical_entry *entry = manager->head;
+  while (entry != NULL) {
+    struct vertical_entry *next = entry->next;
+    vector_free(entry->entries);
+    hashmap_free(entry->value_map);
+    ck_free(entry);
+    entry = next;
+  }
+  entry = manager->old;
   while (entry != NULL) {
     struct vertical_entry *next = entry->next;
     vector_free(entry->entries);
