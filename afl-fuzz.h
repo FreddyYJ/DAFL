@@ -352,6 +352,9 @@ struct vertical_manager {
   struct vertical_entry *head;
   struct vertical_entry *old;
   struct interval_tree *tree;
+  u64 start_time;
+  u8 dynamic_mode;
+  u8 use_vertical;
 };
 
 struct vertical_entry *vertical_entry_create(u32 hash) {
@@ -406,21 +409,18 @@ void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry 
   }
 }
 
-struct vertical_manager *vertical_manager_create() {
-  struct vertical_manager *manager = ck_alloc(sizeof(struct vertical_manager));
-  manager->map = hashmap_create(4096);
-  manager->head = NULL;
-  manager->old = NULL;
-  manager->tree = interval_tree_create();
-  return manager;
-}
+struct vertical_manager *vertical_manager_create();
 
 struct vertical_entry *vertical_manager_select(struct vertical_manager *manager);
 
-u8 determine_vertical_mode(struct vertical_manager *manager) {
-  if (manager->head == NULL && manager->old == NULL) return 0;
+u8 vertical_manager_select_mode(struct vertical_manager *manager);
 
-  return 0;
+u8 vertical_manager_get_mode(struct vertical_manager *manager) {
+  return manager->use_vertical;
+}
+
+void vertical_manager_set_mode(struct vertical_manager *manager, u8 use_vertical) {
+  manager->use_vertical = use_vertical;
 }
 
 void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry) {

@@ -973,6 +973,19 @@ u32 interval_tree_select(struct interval_tree *tree) {
 }
 // End of interval tree
 
+struct vertical_manager *vertical_manager_create() {
+  struct vertical_manager *manager = ck_alloc(sizeof(struct vertical_manager));
+  manager->map = hashmap_create(4096);
+  manager->head = NULL;
+  manager->old = NULL;
+  manager->tree = interval_tree_create();
+  manager->start_time = get_cur_time();
+  manager->dynamic_mode = 0;
+  manager->use_vertical = 0;
+  return manager;
+}
+
+
 /* Insert a test case to the queue, preserving the sorted order based on the
  * proximity score. Updates global variables 'queue', 'shortcut_per_100', and
  * 'first_unhandled'. */
@@ -2071,20 +2084,34 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
   return entry;
 }
 
+u8 vertical_manager_select_mode(struct vertical_manager *manager)  {
+  if (manager->head == NULL && manager->old == NULL) return 0;
+  if (!manager->dynamic_mode) {
+    if (get_cur_time() - manager->start_time > 20 * 60 * 1000) {
+      manager->dynamic_mode = 1;
+    } else {
+      return 0;
+    }
+  }
+  // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
+  vertical_manager_set_mode(manager, !manager->use_vertical);
+  return manager->use_vertical;
+}
+
 static u8 moo_remove_from_queue(struct queue_entry **moo_queue, struct queue_entry *removed) {
   struct queue_entry *q = *moo_queue;
   struct queue_entry *prev = NULL;
   while (q) {
     if (q == removed) {
       if (prev) {
-        prev->next = q->next;
+        prev->next_moo = q->next_moo;
       } else {
-        *moo_queue = q->next;
+        *moo_queue = q->next_moo;
       }
       return 1;
     }
     prev = q;
-    q = q->next;
+    q = q->next_moo;
   }
   return 0;
 }
@@ -2102,6 +2129,7 @@ static struct queue_entry* select_next_entry_dafl() {
       q = q->next;
     }
   }
+  LOGF("[sel] [dafl] [id %d]", q ? q->entry_id : -1);
   return q;
 }
 
@@ -2115,6 +2143,14 @@ static struct queue_entry* select_next_entry_vertical() {
     // push back to the old queue
     vertical_manager_insert_to_old(vertical_manager, entry);
   }
+  if (!q) {
+    // Remove this entry from moo queue
+    u8 removed = moo_remove_from_queue(&pareto_frontier_queue, q);
+    if (!removed) removed = moo_remove_from_queue(&dominated_queue, q);
+    if (!removed) removed = moo_remove_from_queue(&newly_added_queue, q);
+    if (!removed) removed = moo_remove_from_queue(&recycled_queue, q);
+  }
+  LOGF("[sel] [vertical] [id %d] [dfg-path %u] [time %llu]\n", q ? q->entry_id : -1, entry->hash, get_cur_time() - start_time);
   return q;
 }
 
@@ -2160,6 +2196,7 @@ static struct queue_entry* select_next_entry_moo() {
     vector_free(new_entries);
     // If the dominated queue is empty, select from the recycled queue
     if (dominated_size == 0) {
+      vertical_manager_set_mode(vertical_manager, 1);
       vector_free(dominated_vec);
       struct vector *recycled_vec = list_to_vector(recycled_queue);
       LOGF("[sche] [moo] [recycled %u]\n", vector_size(recycled_vec));
@@ -2208,6 +2245,7 @@ static struct queue_entry* select_next_entry_moo() {
   recycled_queue = q;
   LOGF("[sel] [moo] [prev %u] [cur %u] [rank %d] [time %llu]\n",
        prev->entry_id, q->entry_id, queue_rank, get_cur_time() - start_time);
+  return q;
 }
 
 static struct queue_entry* select_next_entry() {
@@ -2219,9 +2257,10 @@ static struct queue_entry* select_next_entry() {
 
   // Determine whether to use the vertical navigation
   if (vertical_use_dynamic) {
-    u8 use_vertical = determine_vertical_mode(vertical_manager);
+    u8 use_vertical = vertical_manager_select_mode(vertical_manager);
     if (use_vertical) {
-      return select_next_entry_vertical();
+      struct queue_entry *q = select_next_entry_vertical();
+      if (q) return q;
     }
   }
 
@@ -3457,6 +3496,7 @@ static u8 check_unique_path() {
     if (vertical_experiment || vertical_use_dynamic) {
       struct vertical_entry *ve = vertical_entry_create(checksum);
       hashmap_insert(vertical_manager->map, checksum, ve);
+      LOGF("[vertical] [entry-add] [id %u] [checksum %u]", hashmap_size(vertical_manager->map), checksum);
     }
     return 1;
   }
@@ -6238,7 +6278,7 @@ u32 convert_to_actual_location(u32 max, u32 sel) {
 u32 select_location_vertical(u32 max, double *rel) {
   u32 result = 0;
   if (max) {
-    if (use_vertical_navigation)
+    if (use_vertical_navigation || vertical_manager_get_mode(vertical_manager))
       result = convert_to_actual_location(max, interval_tree_select(vertical_manager->tree));
     else
       result = UR(max);
@@ -9759,11 +9799,6 @@ abandon_entry:
 static u8 fuzz_one(char **argv) {
   int key_val_lv = 0;
   key_val_lv = fuzz_one_vertical(argv);
-//  if (use_vertical_navigation)
-//    key_val_lv = fuzz_one_vertical(argv);
-//  else
-//    key_val_lv = fuzz_one_original(argv);
-
   return key_val_lv;
 }
 
