@@ -2264,8 +2264,8 @@ static struct queue_entry* select_next_entry_moo() {
   q->next_moo = recycled_queue;
   q->prev_moo = NULL;
   recycled_queue = q;
-  LOGF("[sel] [moo] [prev %d] [cur %d] [rank %d] [dfg-path %u] [time %llu]\n",
-       queue_cur ? queue_cur->entry_id : -1, q->entry_id, queue_rank, q->dfg_cksum, get_cur_time() - start_time);
+  LOGF("[sel] [moo] [id %d] [prev %d] [rank %d] [dfg-path %u] [time %llu]\n",
+       q->entry_id, queue_cur ? queue_cur->entry_id : -1, queue_rank, q->dfg_cksum, get_cur_time() - start_time);
   return q;
 }
 
@@ -3517,7 +3517,7 @@ static u8 check_unique_path() {
     if (vertical_experiment || vertical_use_dynamic) {
       struct vertical_entry *ve = vertical_entry_create(checksum);
       hashmap_insert(vertical_manager->map, checksum, ve);
-      LOGF("[vertical] [entry-add] [id %u] [checksum %u]", hashmap_size(vertical_manager->map), checksum);
+      LOGF("[vertical] [entry-add] [id %u] [checksum %u]\n", hashmap_size(vertical_manager->map), checksum);
     }
     return 1;
   }
@@ -3669,7 +3669,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
     if (!local_kvp) {
       struct vertical_entry *ve = vertical_entry_create(dfg_cksum);
       hashmap_insert(vertical_manager->map, dfg_cksum, ve);
-      LOGF("[vertical] [entry-add-late] [id %u] [checksum %u]", hashmap_size(vertical_manager->map), dfg_cksum);
+      LOGF("[vertical] [entry-add-late] [id %u] [checksum %u]\n", hashmap_size(vertical_manager->map), dfg_cksum);
       local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
     }
     if (local_kvp) {
