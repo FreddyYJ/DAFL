@@ -57,6 +57,7 @@ struct queue_entry {
 
   struct queue_entry *next;           /* Next element, if any             */
   struct queue_entry *next_moo;       /* Next element in the MOO queue    */
+  struct queue_entry *prev_moo;       /* Prev element in MOO queue */
 
 };
 
@@ -169,15 +170,16 @@ struct vector *list_to_vector(struct queue_entry *list) {
 
 struct queue_entry *vector_to_list(struct vector *vec) {
   struct queue_entry *list = NULL;
-  struct queue_entry *tail = NULL;
+  struct queue_entry *prev = NULL;
   for (u32 i = 0; i < vec->size; i++) {
     // Construct the list, skip the NULL entries
     struct queue_entry *entry = vec->data[i];
     if (entry) {
+      entry->prev_moo = prev;
+      entry->next_moo = NULL;
+      if (prev) prev->next_moo = entry;
+      prev = entry;
       if (!list) list = entry;
-      if (tail) tail->next_moo = entry;
-      tail = entry;
-      tail->next_moo = NULL;
     }
   }
   return list;
@@ -384,6 +386,7 @@ void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry 
         ve = ve->next;
       }
       ve->next = entry;
+      entry->next = NULL;
     }
   } else {
     // If valuation is unique, move to the front

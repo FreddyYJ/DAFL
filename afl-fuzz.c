@@ -1039,6 +1039,7 @@ static void moo_insert_to_queue(struct queue_entry *q) {
   if (!newly_added_queue) {
     newly_added_queue = q;
     q->next_moo = NULL;
+    q->prev_moo = NULL;
     return;
   }
   struct queue_entry *q_tail = newly_added_queue;
@@ -1046,6 +1047,7 @@ static void moo_insert_to_queue(struct queue_entry *q) {
     if (!q_tail->next_moo) {
       q_tail->next_moo = q;
       q->next_moo = NULL;
+      q->prev_moo = q_tail;
       break;
     }
     q_tail = q_tail->next_moo;
@@ -1069,6 +1071,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   q->rank         = queue_rank + 1;
   q->next = NULL;
   q->next_moo = NULL;
+  q->prev_moo = NULL;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
@@ -2087,7 +2090,7 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
 u8 vertical_manager_select_mode(struct vertical_manager *manager)  {
   if (manager->head == NULL && manager->old == NULL) return 0;
   if (!manager->dynamic_mode) {
-    if (get_cur_time() - manager->start_time > 20 * 60 * 1000) {
+    if (get_cur_time() - manager->start_time > 30 * 60 * 1000) {
       manager->dynamic_mode = 1;
     } else {
       return 0;
@@ -2096,24 +2099,6 @@ u8 vertical_manager_select_mode(struct vertical_manager *manager)  {
   // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
   vertical_manager_set_mode(manager, !manager->use_vertical);
   return manager->use_vertical;
-}
-
-static u8 moo_remove_from_queue(struct queue_entry **moo_queue, struct queue_entry *removed) {
-  struct queue_entry *q = *moo_queue;
-  struct queue_entry *prev = NULL;
-  while (q) {
-    if (q == removed) {
-      if (prev) {
-        prev->next_moo = q->next_moo;
-      } else {
-        *moo_queue = q->next_moo;
-      }
-      return 1;
-    }
-    prev = q;
-    q = q->next_moo;
-  }
-  return 0;
 }
 
 
@@ -2129,9 +2114,45 @@ static struct queue_entry* select_next_entry_dafl() {
       q = q->next;
     }
   }
-  LOGF("[sel] [dafl] [id %d]", q ? q->entry_id : -1);
+  LOGF("[sel] [dafl] [id %d] [time %llu]\n", q ? q->entry_id : -1, get_cur_time() - start_time);
   return q;
 }
+
+static void move_entry_to_recycled(struct queue_entry *prev_entry) {
+  // Remove this entry from moo queue
+  if (!prev_entry) return;
+  struct queue_entry *q = recycled_queue;
+  while (q) {
+    if (q == prev_entry) {
+      return;
+    }
+    q = q->next_moo;
+  }
+
+  // If it was head of list
+  if (!prev_entry->prev_moo) {
+    if (prev_entry == pareto_frontier_queue) {
+      pareto_frontier_queue = pareto_frontier_queue->next_moo;
+      pareto_frontier_queue->prev_moo = NULL;
+    } else if (prev_entry == newly_added_queue) {
+      newly_added_queue = newly_added_queue->next_moo;
+      newly_added_queue->prev_moo = NULL;
+    } else if (prev_entry == dominated_queue) {
+      dominated_queue = dominated_queue->next_moo;
+      dominated_queue->prev_moo = NULL;
+    }
+  } else {
+    q = prev_entry->prev_moo;
+    q->next_moo = prev_entry->next_moo;
+    if (q->next_moo)
+      q->next_moo->prev_moo = q;
+  }
+  if (recycled_queue) recycled_queue->prev_moo = prev_entry;
+  prev_entry->prev_moo = NULL;
+  prev_entry->next_moo = recycled_queue;
+  recycled_queue = prev_entry;
+}
+
 
 static struct queue_entry* select_next_entry_vertical() {
   struct vertical_entry *entry = vertical_manager_select(vertical_manager);
@@ -2144,11 +2165,7 @@ static struct queue_entry* select_next_entry_vertical() {
     vertical_manager_insert_to_old(vertical_manager, entry);
   }
   if (!q) {
-    // Remove this entry from moo queue
-    u8 removed = moo_remove_from_queue(&pareto_frontier_queue, q);
-    if (!removed) removed = moo_remove_from_queue(&dominated_queue, q);
-    if (!removed) removed = moo_remove_from_queue(&newly_added_queue, q);
-    if (!removed) removed = moo_remove_from_queue(&recycled_queue, q);
+    move_entry_to_recycled(q);
   }
   LOGF("[sel] [vertical] [id %d] [dfg-path %u] [time %llu]\n", q ? q->entry_id : -1, entry->hash, get_cur_time() - start_time);
   return q;
@@ -2238,13 +2255,17 @@ static struct queue_entry* select_next_entry_moo() {
     vector_free(pareto_frontier_vec);
   }
   // Pop from pareto_frontier_queue, push to recycled_queue
-  struct queue_entry *prev = queue_cur;
   q = pareto_frontier_queue;
   pareto_frontier_queue = q->next_moo;
+  if (pareto_frontier_queue)
+    pareto_frontier_queue->prev_moo = NULL;
+  if (recycled_queue)
+    recycled_queue->prev_moo = q;
   q->next_moo = recycled_queue;
+  q->prev_moo = NULL;
   recycled_queue = q;
-  LOGF("[sel] [moo] [prev %u] [cur %u] [rank %d] [time %llu]\n",
-       prev->entry_id, q->entry_id, queue_rank, get_cur_time() - start_time);
+  LOGF("[sel] [moo] [prev %d] [cur %d] [rank %d] [dfg-path %u] [time %llu]\n",
+       queue_cur ? queue_cur->entry_id : -1, q->entry_id, queue_rank, q->dfg_cksum, get_cur_time() - start_time);
   return q;
 }
 
@@ -3645,6 +3666,12 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   // Check if the hash is already in the hashmap
   if (vertical_experiment || vertical_use_dynamic) {
     struct key_value_pair* local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
+    if (!local_kvp) {
+      struct vertical_entry *ve = vertical_entry_create(dfg_cksum);
+      hashmap_insert(vertical_manager->map, dfg_cksum, ve);
+      LOGF("[vertical] [entry-add-late] [id %u] [checksum %u]", hashmap_size(vertical_manager->map), dfg_cksum);
+      local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
+    }
     if (local_kvp) {
       struct vertical_entry *local_entry = local_kvp->value;
       struct hashmap *local_valuation_hashmap = local_entry->value_map;
@@ -5992,7 +6019,7 @@ static double calculate_factor(double prox_score) {
     factor = pow(2.0, 5.0 * 2.0 * (p - 0.5)); // Note log2(MAX_FACTOR) = 5.0
   }
   else if (no_dfg_schedule || !avg_prox_score.original) factor = 1.0; // No factor.
-  else factor = (prox_score) / ((double) avg_prox_score.adjusted); // Default.
+  else factor = (prox_score) / ((double) avg_prox_score.original); // Default.
 
   return factor;
 
@@ -7443,7 +7470,7 @@ static u8 fuzz_one_vertical(char** argv) {
   if (!splice_cycle) {
 
     /* Adjust perf_score with the factor derived from the proximity score */
-    double prox_score = queue_cur->prox_score.adjusted;
+    double prox_score = (double)queue_cur->prox_score.original;
     perf_score = (u32) (calculate_factor(prox_score) * (double) perf_score);
 
     stage_name  = "havoc-vertical";
