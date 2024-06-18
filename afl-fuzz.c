@@ -324,6 +324,8 @@ static struct proximity_score max_prox_score;        /* Maximum score of the see
 static struct proximity_score min_prox_score; /* Minimum score of the seed queue  */
 static struct proximity_score total_prox_score; /* Sum of proximity scores          */
 static struct proximity_score avg_prox_score; /* Average of proximity scores      */
+u64 total_prox_original = 0;
+u64 total_prox_cnt = 0;
 
 static struct hashmap *dfg_hashmap;     /* Hashmap for DFG coverage         */
 
@@ -2077,12 +2079,14 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
   if (entry) {
     manager->head = entry->next;
     entry->use_count++;
+    entry->next = NULL;
   } else {
     // Pop from old
     entry = manager->old;
     manager->old = NULL;
     manager->head =entry->next;
     entry->use_count++;
+    entry->next = NULL;
   }
   return entry;
 }
@@ -3834,6 +3838,8 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   q->exec_us     = (stop_us - start_us) / stage_max;
   q->bitmap_size = count_bytes(trace_bits);
   compute_proximity_score(&q->prox_score, dfg_bits, 1);
+  total_prox_original += q->prox_score.original;
+  total_prox_cnt++;
   q->handicap    = handicap;
   q->cal_failed  = 0;
 
@@ -6018,8 +6024,8 @@ static double calculate_factor(double prox_score) {
     p = normalized_prox_score * (1.0 - T) + 0.5 * T;
     factor = pow(2.0, 5.0 * 2.0 * (p - 0.5)); // Note log2(MAX_FACTOR) = 5.0
   }
-  else if (no_dfg_schedule || !avg_prox_score.original) factor = 1.0; // No factor.
-  else factor = (prox_score) / ((double) avg_prox_score.original); // Default.
+  else if (no_dfg_schedule || !total_prox_cnt) factor = 1.0; // No factor.
+  else factor = (prox_score) / ((double) total_prox_original / (double) total_prox_cnt); // Default.
 
   return factor;
 
