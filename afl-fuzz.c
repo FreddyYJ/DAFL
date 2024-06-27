@@ -169,11 +169,12 @@ static s32 forksrv_pid,               /* PID of the fork server           */
 EXP_ST u8* trace_bits;                /* SHM with code coverage bitmap    */
 EXP_ST u32* dfg_bits;                 /* SHM with DFG coverage bitmap     */
 EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
+EXP_ST u32 last_location = MAP_SIZE + 1;         /* Last location of the target      */
 
 EXP_ST u64 dfg_node_count[DFG_MAP_SIZE];  /* Node counts for DFG              */
 EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
 EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
-EXP_ST s32 dfg_targets[DFG_MAP_SIZE];
+EXP_ST u32 dfg_targets[DFG_MAP_SIZE];
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -987,6 +988,11 @@ struct vertical_manager *vertical_manager_create() {
   return manager;
 }
 
+static u32 get_last_loc() {
+  u32 loc = dfg_bits[DFG_MAP_SIZE - 1];
+  dfg_bits[DFG_MAP_SIZE - 1] = 0;
+  return loc;
+}
 
 /* Insert a test case to the queue, preserving the sorted order based on the
  * proximity score. Updates global variables 'queue', 'shortcut_per_100', and
@@ -1365,11 +1371,6 @@ static u32 count_non_255_bytes(u8* mem) {
 static u8 check_covered_target() {
   if (dfg_target_idx < DFG_MAP_SIZE)
     return dfg_bits[dfg_target_idx] != 0;
-//  for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
-//    s32 idx = dfg_targets[i];
-//    if (idx < 0) break;
-//    if (dfg_bits[idx] != 0) return 1;
-//  }
   return 0;
 }
 
@@ -1607,16 +1608,11 @@ static void init_dfg(u8* dfg_node_info_file) {
     idx++;
   }
   fclose(file);
-  u32 dfg_target_count = 0;
-  memset(dfg_targets, -1, DFG_MAP_SIZE * sizeof(u32));
   for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
-    if (dfg_node_info_map[i].score >= max_score - 1) {
-      dfg_targets[dfg_target_count++] = i;
-    }
+    dfg_targets[i] = MAP_SIZE + 1;
   }
-  dfg_targets[dfg_target_count] = -1;
-  ACTF("Check dfg_node_info_map target: %u, max_score: %u vs idx %u, score %u, target_cnt: %u", dfg_target_idx, max_score,
-       dfg_node_info_map[dfg_target_idx].idx, dfg_node_info_map[dfg_target_idx].score, dfg_target_count);
+  ACTF("Check dfg_node_info_map target: %u, max_score: %u vs idx %u, score %u", dfg_target_idx, max_score,
+       dfg_node_info_map[dfg_target_idx].idx, dfg_node_info_map[dfg_target_idx].score);
 }
 
 static void update_global_prox_score(struct proximity_score *prox_score) {
@@ -3241,6 +3237,7 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
   u32 tb4;
 
   child_timed_out = 0;
+  last_location = MAP_SIZE + 1;
 
   /* After this memset, trace_bits[] are effectively volatile, so we
      must prevent any earlier operations from venturing into that
@@ -3413,6 +3410,8 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
 
   /* Report outcome to caller. */
 
+  last_location = get_last_loc();
+
   if (WIFSIGNALED(status) && !stop_soon) {
 
     kill_signal = WTERMSIG(status);
@@ -3560,9 +3559,17 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 covered[100] = "";
   u8 *tmp_argv1 = "";
 
-  // SAYF("[pacfix] [cov] [crashed %u] [cov %u]\n", crashed, check_covered_target());
-  if (!crashed) return check_covered_target();
-  // if (crashed && !check_covered_target()) return 0;
+  u8 coverage_result = check_covered_target();
+  if (!crashed) return coverage_result;
+  if (crashed && !coverage_result) return 0;
+
+  for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+    if (dfg_targets[i] > MAP_SIZE) return 0;
+    else if (dfg_targets[i] == last_location) {
+      SAYF("[pacfix] [cov] [crash 1] [result 1]\n");
+      return 1;
+    }
+  }
 
   u8 fault_tmp;
   u32 line = 0;
@@ -3607,9 +3614,12 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
     remove(tmpfile);
     ck_free(tmpfile);
     ck_free(cmd);
-    if (result == NULL) return 1;
-    if(sscanf(covered, "__localize: %d", &parsed_line) != 1) return 1;
-    if(parsed_line == line) return 1;
+    if (result == NULL) return 0;
+    if(sscanf(covered, "__localize: %d", &parsed_line) != 1) return 0;
+    if(parsed_line == line) {
+      LOGF("[cov] [new %u] [old 1]\n", coverage_result);
+      return 1;
+    }
     else return 0;
   } else {
     cmd = alloc_printf("grep \"%d\" %s | wc -l", line, tmpfile);
@@ -3665,7 +3675,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   u32 hash = hash_file(tmpfile);
   struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
   if (q) {
-    LOGF("[vertical] [entry] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [crash %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(unique_mem_hashmap), crashed, get_cur_time() - start_time);
+    LOGF("[vertical] [entry] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [crash %u] [time %llu] [last-loc %d]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(unique_mem_hashmap), crashed, get_cur_time() - start_time, q ? q->last_location : -1);
   }
   // Check if the hash is already in the hashmap
   if (vertical_experiment || vertical_use_dynamic) {
@@ -3941,7 +3951,15 @@ static void perform_dry_run(char** argv) {
     res = calibrate_case(argv, q, use_mem, 0, 1);
     u32 checksum = get_dfg_checksum();
     q->dfg_cksum = checksum;
-    LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s]\n", q->entry_id, checksum, res, q->fname);
+    q->last_location = last_location;
+    for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+      if (dfg_targets[i] > MAP_SIZE) {
+        dfg_targets[i] = last_location;
+      } else if (dfg_targets[i] == last_location) {
+        break;
+      }
+    }
+    LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s] [last-loc %u]\n", q->entry_id, checksum, res, q->fname, last_location);
 
     if (stop_soon) return;
 
@@ -4419,8 +4437,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
       queue_last->dfg_cksum = get_dfg_checksum();
-      LOGF("[vertical] [save] [seed %d] [id %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu]\n",
-           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time);
+      queue_last->last_location = last_location;
+      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u]\n",
+           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, last_location);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */

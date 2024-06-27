@@ -43,6 +43,7 @@ struct queue_entry {
   u32 bitmap_size,                    /* Number of bits set in bitmap     */
   exec_cksum,                     /* Checksum of the execution trace  */
   dfg_cksum;
+  s32 last_location;
 
   struct proximity_score prox_score;  /* Proximity score of the test case */
   u32 entry_id;                       /* The ID assigned to the test case */
@@ -390,25 +391,25 @@ void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry 
     }
   } else {
     // If valuation is unique, move to the front
-    if (!kvp) {
-      vector_push_front(entry->entries, q);
-      struct vertical_entry *ve = manager->head;
-      struct vertical_entry *prev = NULL;
-      while (ve != NULL) {
-        if (ve == entry) {
-          if (prev) {
-            prev->next = ve->next;
-            ve->next = manager->head;
-            manager->head = ve;
-          }
-          break;
-        }
-        prev = ve;
-        ve = ve->next;
-      }
-    } else {
+//    if (!kvp) {
+//      vector_push_front(entry->entries, q);
+//      struct vertical_entry *ve = manager->head;
+//      struct vertical_entry *prev = NULL;
+//      while (ve != NULL) {
+//        if (ve == entry) {
+//          if (prev) {
+//            prev->next = ve->next;
+//            ve->next = manager->head;
+//            manager->head = ve;
+//          }
+//          break;
+//        }
+//        prev = ve;
+//        ve = ve->next;
+//      }
+//    } else {
       push_back(entry->entries, q);
-    }
+//    }
   }
 }
 
