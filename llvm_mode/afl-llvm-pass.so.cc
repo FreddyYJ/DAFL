@@ -107,7 +107,7 @@ void initDFGNodeMap(char* dfg_file) {
     unsigned long long path_cnt = stoull(path_cnt_str);
     dfg_node_map[targ_line] = std::make_pair(idx++, (unsigned int) score);
     dfg_path_map[targ_line] = path_cnt;
-    if (idx >= DFG_MAP_SIZE) {
+    if (idx >= DFG_MAP_SIZE - 1) {
       std::cout << "Input DFG is too large (check DFG_MAP_SIZE)" << std::endl;
       exit(1);
     }
@@ -255,6 +255,14 @@ bool AFLCoverage::runOnModule(Module &M) {
       unsigned int cur_loc = AFL_R(MAP_SIZE);
 
       ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+
+      /* Record current location in AFLMapDFGPtr */
+      LoadInst *DFGMap = IRB.CreateLoad(AFLMapDFGPtr);
+      DFGMap->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      ConstantInt *DFGMapIdx = ConstantInt::get(Int32Ty, DFG_MAP_SIZE - 1);
+      Value *DFGMapPtrIdxCur = IRB.CreateGEP(DFGMap, DFGMapIdx);
+      StoreInst *StoreCur = IRB.CreateStore(CurLoc, DFGMapPtrIdxCur);
+      StoreCur->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
       /* Load prev_loc */
 

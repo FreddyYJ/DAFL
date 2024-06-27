@@ -43,6 +43,7 @@ struct queue_entry {
   u32 bitmap_size,                    /* Number of bits set in bitmap     */
   exec_cksum,                     /* Checksum of the execution trace  */
   dfg_cksum;
+  s32 last_location;
 
   struct proximity_score prox_score;  /* Proximity score of the test case */
   u32 entry_id;                       /* The ID assigned to the test case */
@@ -57,6 +58,7 @@ struct queue_entry {
 
   struct queue_entry *next;           /* Next element, if any             */
   struct queue_entry *next_moo;       /* Next element in the MOO queue    */
+  struct queue_entry *prev_moo;       /* Prev element in MOO queue */
 
 };
 
@@ -134,6 +136,24 @@ void push_back(struct vector* vec, struct queue_entry* element) {
   vec->data[vec->size++] = element;
 }
 
+void vector_push_front(struct vector *vec, struct queue_entry *element) {
+  push_back(vec, element);
+  for (u32 i = vec->size - 1; i > 0; i--) {
+    vec->data[i] = vec->data[i - 1];
+  }
+  vec->data[0] = element;
+}
+
+struct queue_entry * vector_pop_front(struct vector *vec) {
+  if (vec->size == 0) return NULL;
+  struct queue_entry *entry = vec->data[0];
+  for (u32 i = 0; i < vec->size - 1; i++) {
+    vec->data[i] = vec->data[i + 1];
+  }
+  vec->size--;
+  return entry;
+}
+
 void vector_free(struct vector* vec) {
   ck_free(vec->data);
   ck_free(vec);
@@ -151,15 +171,16 @@ struct vector *list_to_vector(struct queue_entry *list) {
 
 struct queue_entry *vector_to_list(struct vector *vec) {
   struct queue_entry *list = NULL;
-  struct queue_entry *tail = NULL;
+  struct queue_entry *prev = NULL;
   for (u32 i = 0; i < vec->size; i++) {
     // Construct the list, skip the NULL entries
     struct queue_entry *entry = vec->data[i];
     if (entry) {
+      entry->prev_moo = prev;
+      entry->next_moo = NULL;
+      if (prev) prev->next_moo = entry;
+      prev = entry;
       if (!list) list = entry;
-      if (tail) tail->next_moo = entry;
-      tail = entry;
-      tail->next_moo = NULL;
     }
   }
   return list;
@@ -266,6 +287,26 @@ void hashmap_insert(struct hashmap* map, u32 key, void* value) {
   }
 }
 
+void hashmap_remove(struct hashmap *map, u32 key) {
+  u32 index = hashmap_fit(key, map->table_size);
+  struct key_value_pair* pair = map->table[index];
+  struct key_value_pair* prev = NULL;
+  while (pair != NULL) {
+    if (pair->key == key) {
+      if (!prev) {
+        map->table[index] = pair->next;
+      } else {
+        prev->next = pair->next;
+      }
+      map->size--;
+      ck_free(pair);
+      return;
+    }
+    prev = pair;
+    pair = pair->next;
+  }
+}
+
 struct key_value_pair* hashmap_get(struct hashmap* map, u32 key) {
   u32 index = hashmap_fit(key, map->table_size);
   struct key_value_pair* pair = map->table[index];
@@ -300,5 +341,126 @@ void hashmap_free(struct hashmap* map) {
   ck_free(map->table);
   ck_free(map);
 }
+
+struct vertical_entry {
+  u32 hash;
+  u32 use_count;
+  struct vector *entries;
+  struct vertical_entry *next;
+  struct hashmap *value_map;  // valuation hash
+};
+
+struct vertical_manager {
+  struct hashmap *map; // path -> vertical_entry
+  struct vertical_entry *head;
+  struct vertical_entry *old;
+  struct interval_tree *tree;
+  u64 start_time;
+  u8 dynamic_mode;
+  u8 use_vertical;
+};
+
+struct vertical_entry *vertical_entry_create(u32 hash) {
+  struct vertical_entry *entry = ck_alloc(sizeof(struct vertical_entry));
+  entry->hash = hash;
+  entry->use_count = 0;
+  entry->entries = vector_create();
+  entry->next = NULL;
+  entry->value_map = hashmap_create(8);
+  return entry;
+}
+
+void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
+  if (!q) return;
+  if (vector_size(entry->entries) == 0) {
+    push_back(entry->entries, q);
+    // This is the first seed for this dug-path
+    // Insert the entry to the queue
+    // If valuation is unique, insert to the front
+    if (!manager->head || !kvp) {
+      entry->next = manager->head;
+      manager->head = entry;
+    } else {
+      // If valuation is not unique, insert to the end
+      struct vertical_entry *ve = manager->head;
+      while (ve->next != NULL) {
+        ve = ve->next;
+      }
+      ve->next = entry;
+      entry->next = NULL;
+    }
+  } else {
+    // If valuation is unique, move to the front
+//    if (!kvp) {
+//      vector_push_front(entry->entries, q);
+//      struct vertical_entry *ve = manager->head;
+//      struct vertical_entry *prev = NULL;
+//      while (ve != NULL) {
+//        if (ve == entry) {
+//          if (prev) {
+//            prev->next = ve->next;
+//            ve->next = manager->head;
+//            manager->head = ve;
+//          }
+//          break;
+//        }
+//        prev = ve;
+//        ve = ve->next;
+//      }
+//    } else {
+      push_back(entry->entries, q);
+//    }
+  }
+}
+
+struct vertical_manager *vertical_manager_create();
+
+struct vertical_entry *vertical_manager_select(struct vertical_manager *manager);
+
+u8 vertical_manager_select_mode(struct vertical_manager *manager);
+
+u8 vertical_manager_get_mode(struct vertical_manager *manager) {
+  return manager->use_vertical;
+}
+
+void vertical_manager_set_mode(struct vertical_manager *manager, u8 use_vertical) {
+  manager->use_vertical = use_vertical;
+}
+
+void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry) {
+  if (manager->old == NULL) {
+    manager->old = entry;
+  } else {
+    struct vertical_entry *ve = manager->old;
+    while (ve->next != NULL) {
+      ve = ve->next;
+    }
+    ve->next = entry;
+  }
+}
+
+void vertical_manager_free(struct vertical_manager *manager) {
+  if (manager == NULL) return;
+  hashmap_free(manager->map);
+  struct vertical_entry *entry = manager->head;
+  while (entry != NULL) {
+    struct vertical_entry *next = entry->next;
+    vector_free(entry->entries);
+    hashmap_free(entry->value_map);
+    ck_free(entry);
+    entry = next;
+  }
+  entry = manager->old;
+  while (entry != NULL) {
+    struct vertical_entry *next = entry->next;
+    vector_free(entry->entries);
+    hashmap_free(entry->value_map);
+    ck_free(entry);
+    entry = next;
+  }
+  interval_tree_free(manager->tree);
+  ck_free(manager);
+}
+
 
 #endif //DAFL_AFL_FUZZ_H

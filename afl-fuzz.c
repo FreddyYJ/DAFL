@@ -106,11 +106,10 @@ static u8 vertical_is_persistent = 0;
 static u8 vertical_is_interesting = 0;
 static u8 vertical_is_new_valuation = 0;
 
-static u8 vertical_use_full = 0;
+static u8 vertical_use_dynamic = 0;
 static u8 vertical_experiment = 0;
-static struct hashmap *vertical_hashmap = NULL;
 
-static struct interval_tree *vertical_tree = 0;
+static struct vertical_manager *vertical_manager = NULL;
 // End vertical navigation
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
@@ -170,11 +169,12 @@ static s32 forksrv_pid,               /* PID of the fork server           */
 EXP_ST u8* trace_bits;                /* SHM with code coverage bitmap    */
 EXP_ST u32* dfg_bits;                 /* SHM with DFG coverage bitmap     */
 EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
+EXP_ST u32 last_location = MAP_SIZE + 1;         /* Last location of the target      */
 
 EXP_ST u64 dfg_node_count[DFG_MAP_SIZE];  /* Node counts for DFG              */
 EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
 EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
-EXP_ST s32 dfg_targets[DFG_MAP_SIZE];
+EXP_ST u32 dfg_targets[DFG_MAP_SIZE];
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -325,6 +325,8 @@ static struct proximity_score max_prox_score;        /* Maximum score of the see
 static struct proximity_score min_prox_score; /* Minimum score of the seed queue  */
 static struct proximity_score total_prox_score; /* Sum of proximity scores          */
 static struct proximity_score avg_prox_score; /* Average of proximity scores      */
+u64 total_prox_original = 0;
+u64 total_prox_cnt = 0;
 
 static struct hashmap *dfg_hashmap;     /* Hashmap for DFG coverage         */
 
@@ -948,12 +950,7 @@ u32 interval_node_select(struct interval_node *node) {
   }
   double left_ratio = interval_node_ratio(node->left);
   double right_ratio = interval_node_ratio(node->right);
-  u32 min_size = (node->end - node->start + 1) / 2;
-  if (vertical_use_full) {
-    min_size = MAX(min_size / 2, 1);
-  } else {
-    min_size = 1;
-  }
+  u32 min_size = 1;
   double total = left_ratio + right_ratio;
   if ((total == 0.0) || ((node->left->count < min_size) || (node->right->count < min_size))) {
     return sel_in_node;
@@ -978,6 +975,24 @@ u32 interval_tree_select(struct interval_tree *tree) {
   return interval_node_select(tree->root);
 }
 // End of interval tree
+
+struct vertical_manager *vertical_manager_create() {
+  struct vertical_manager *manager = ck_alloc(sizeof(struct vertical_manager));
+  manager->map = hashmap_create(4096);
+  manager->head = NULL;
+  manager->old = NULL;
+  manager->tree = interval_tree_create();
+  manager->start_time = get_cur_time();
+  manager->dynamic_mode = 0;
+  manager->use_vertical = 0;
+  return manager;
+}
+
+static u32 get_last_loc() {
+  u32 loc = dfg_bits[DFG_MAP_SIZE - 1];
+  dfg_bits[DFG_MAP_SIZE - 1] = 0;
+  return loc;
+}
 
 /* Insert a test case to the queue, preserving the sorted order based on the
  * proximity score. Updates global variables 'queue', 'shortcut_per_100', and
@@ -1032,6 +1047,7 @@ static void moo_insert_to_queue(struct queue_entry *q) {
   if (!newly_added_queue) {
     newly_added_queue = q;
     q->next_moo = NULL;
+    q->prev_moo = NULL;
     return;
   }
   struct queue_entry *q_tail = newly_added_queue;
@@ -1039,6 +1055,7 @@ static void moo_insert_to_queue(struct queue_entry *q) {
     if (!q_tail->next_moo) {
       q_tail->next_moo = q;
       q->next_moo = NULL;
+      q->prev_moo = q_tail;
       break;
     }
     q_tail = q_tail->next_moo;
@@ -1062,6 +1079,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   q->rank         = queue_rank + 1;
   q->next = NULL;
   q->next_moo = NULL;
+  q->prev_moo = NULL;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
@@ -1353,11 +1371,6 @@ static u32 count_non_255_bytes(u8* mem) {
 static u8 check_covered_target() {
   if (dfg_target_idx < DFG_MAP_SIZE)
     return dfg_bits[dfg_target_idx] != 0;
-//  for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
-//    s32 idx = dfg_targets[i];
-//    if (idx < 0) break;
-//    if (dfg_bits[idx] != 0) return 1;
-//  }
   return 0;
 }
 
@@ -1403,10 +1416,10 @@ static void update_dfg_count_map(struct queue_entry *q) {
 
   if (is_unique) {
     unique_dafl_input++;
-    LOGF("[q] [uniq] [seed %u] [id %u] [orig %llu] [adj %.4f] [cov %u] [cnt %u]\n",
+    LOGF("[q] [uniq] [seed %d] [id %u] [orig %llu] [adj %.4f] [cov %u] [cnt %u]\n",
          queue_cur ? queue_cur->entry_id : -1, q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered, unique_dafl_input);
   } else {
-    LOGF("[q] [non-uniq] [seed %u] [id %u] [orig %llu] [adj %.4f] [cov %u]\n",
+    LOGF("[q] [non-uniq] [seed %d] [id %u] [orig %llu] [adj %.4f] [cov %u]\n",
          queue_cur ? queue_cur->entry_id : -1, q->entry_id, q->prox_score.original, q->prox_score.adjusted, q->prox_score.covered);
   }
 
@@ -1595,16 +1608,11 @@ static void init_dfg(u8* dfg_node_info_file) {
     idx++;
   }
   fclose(file);
-  u32 dfg_target_count = 0;
-  memset(dfg_targets, -1, DFG_MAP_SIZE * sizeof(u32));
   for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
-    if (dfg_node_info_map[i].score >= max_score - 1) {
-      dfg_targets[dfg_target_count++] = i;
-    }
+    dfg_targets[i] = MAP_SIZE + 1;
   }
-  dfg_targets[dfg_target_count] = -1;
-  ACTF("Check dfg_node_info_map target: %u, max_score: %u vs idx %u, score %u, target_cnt: %u", dfg_target_idx, max_score,
-       dfg_node_info_map[dfg_target_idx].idx, dfg_node_info_map[dfg_target_idx].score, dfg_target_count);
+  ACTF("Check dfg_node_info_map target: %u, max_score: %u vs idx %u, score %u", dfg_target_idx, max_score,
+       dfg_node_info_map[dfg_target_idx].idx, dfg_node_info_map[dfg_target_idx].score);
 }
 
 static void update_global_prox_score(struct proximity_score *prox_score) {
@@ -2060,25 +2068,112 @@ static void update_ranks(struct queue_entry *a, struct queue_entry *b) {
   }
 }
 
-static struct queue_entry* select_next_entry() {
+struct vertical_entry *vertical_manager_select(struct vertical_manager *manager) {
+  if (manager->head == NULL && manager->old == NULL) return NULL;
+  // Pop from head
+  struct vertical_entry *entry = manager->head;
+  if (entry) {
+    manager->head = entry->next;
+    entry->use_count++;
+    entry->next = NULL;
+  } else {
+    // Pop from old
+    entry = manager->old;
+    manager->old = NULL;
+    manager->head =entry->next;
+    entry->use_count++;
+    entry->next = NULL;
+  }
+  return entry;
+}
 
-  struct queue_entry* q = NULL;
-  if (!use_moo_scheduler) {
-    update_dfg_score(queue_last);
-    // Use the default scheduler
-    q = queue_cur;
-    if (first_unhandled) { // This is set only when a new item was added.
-      q = first_unhandled;
-      first_unhandled = NULL;
-    } else { // Proceed to the next unhandled item in the queue.
-      while (q && q->handled_in_cycle) {
-        q = q->next;
-      }
+u8 vertical_manager_select_mode(struct vertical_manager *manager)  {
+  if (manager->head == NULL && manager->old == NULL) return 0;
+  if (!manager->dynamic_mode) {
+    if (get_cur_time() - manager->start_time > 30 * 60 * 1000) {
+      manager->dynamic_mode = 1;
+    } else {
+      return 0;
     }
-    return q;
+  }
+  // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
+  vertical_manager_set_mode(manager, !manager->use_vertical);
+  return manager->use_vertical;
+}
+
+
+static struct queue_entry* select_next_entry_dafl() {
+  struct queue_entry* q = NULL;
+  update_dfg_score(queue_last);
+  q = queue_cur;
+  if (first_unhandled) { // This is set only when a new item was added.
+    q = first_unhandled;
+    first_unhandled = NULL;
+  } else { // Proceed to the next unhandled item in the queue.
+    while (q && q->handled_in_cycle) {
+      q = q->next;
+    }
+  }
+  LOGF("[sel] [dafl] [id %d] [time %llu]\n", q ? q->entry_id : -1, get_cur_time() - start_time);
+  return q;
+}
+
+static void move_entry_to_recycled(struct queue_entry *prev_entry) {
+  // Remove this entry from moo queue
+  if (!prev_entry) return;
+  struct queue_entry *q = recycled_queue;
+  while (q) {
+    if (q == prev_entry) {
+      return;
+    }
+    q = q->next_moo;
   }
 
+  // If it was head of list
+  if (!prev_entry->prev_moo) {
+    if (prev_entry == pareto_frontier_queue) {
+      pareto_frontier_queue = pareto_frontier_queue->next_moo;
+      pareto_frontier_queue->prev_moo = NULL;
+    } else if (prev_entry == newly_added_queue) {
+      newly_added_queue = newly_added_queue->next_moo;
+      newly_added_queue->prev_moo = NULL;
+    } else if (prev_entry == dominated_queue) {
+      dominated_queue = dominated_queue->next_moo;
+      dominated_queue->prev_moo = NULL;
+    }
+  } else {
+    q = prev_entry->prev_moo;
+    q->next_moo = prev_entry->next_moo;
+    if (q->next_moo)
+      q->next_moo->prev_moo = q;
+  }
+  if (recycled_queue) recycled_queue->prev_moo = prev_entry;
+  prev_entry->prev_moo = NULL;
+  prev_entry->next_moo = recycled_queue;
+  recycled_queue = prev_entry;
+}
+
+
+static struct queue_entry* select_next_entry_vertical() {
+  struct vertical_entry *entry = vertical_manager_select(vertical_manager);
+  struct queue_entry* q = NULL;
+  if (!entry) return NULL;
+
+  q = vector_pop_front(entry->entries);
+  if (vector_size(entry->entries) > 0) {
+    // push back to the old queue
+    vertical_manager_insert_to_old(vertical_manager, entry);
+  }
+  if (!q) {
+    move_entry_to_recycled(q);
+  }
+  LOGF("[sel] [vertical] [id %d] [dfg-path %u] [time %llu]\n", q ? q->entry_id : -1, entry->hash, get_cur_time() - start_time);
+  return q;
+}
+
+static struct queue_entry* select_next_entry_moo() {
   // Use the MOO scheduler
+  struct queue_entry *q = NULL;
   if (!pareto_frontier_queue) {
     // If the pareto frontier queue is empty, select from the dominated queue
     // First, update the adjusted score
@@ -2118,6 +2213,7 @@ static struct queue_entry* select_next_entry() {
     vector_free(new_entries);
     // If the dominated queue is empty, select from the recycled queue
     if (dominated_size == 0) {
+      vertical_manager_set_mode(vertical_manager, 1);
       vector_free(dominated_vec);
       struct vector *recycled_vec = list_to_vector(recycled_queue);
       LOGF("[sche] [moo] [recycled %u]\n", vector_size(recycled_vec));
@@ -2159,14 +2255,38 @@ static struct queue_entry* select_next_entry() {
     vector_free(pareto_frontier_vec);
   }
   // Pop from pareto_frontier_queue, push to recycled_queue
-  struct queue_entry *prev = queue_cur;
   q = pareto_frontier_queue;
   pareto_frontier_queue = q->next_moo;
+  if (pareto_frontier_queue)
+    pareto_frontier_queue->prev_moo = NULL;
+  if (recycled_queue)
+    recycled_queue->prev_moo = q;
   q->next_moo = recycled_queue;
+  q->prev_moo = NULL;
   recycled_queue = q;
-  LOGF("[sel] [moo] [prev %u] [cur %u] [rank %d] [time %llu]\n",
-       prev->entry_id, q->entry_id, queue_rank, get_cur_time() - start_time);
+  LOGF("[sel] [moo] [id %d] [prev %d] [rank %d] [dfg-path %u] [time %llu]\n",
+       q->entry_id, queue_cur ? queue_cur->entry_id : -1, queue_rank, q->dfg_cksum, get_cur_time() - start_time);
   return q;
+}
+
+static struct queue_entry* select_next_entry() {
+
+  // Use the default dafl scheduler
+  if (!use_moo_scheduler) {
+    return select_next_entry_dafl();
+  }
+
+  // Determine whether to use the vertical navigation
+  if (vertical_use_dynamic) {
+    u8 use_vertical = vertical_manager_select_mode(vertical_manager);
+    if (use_vertical) {
+      struct queue_entry *q = select_next_entry_vertical();
+      if (q) return q;
+    }
+  }
+
+  // Else: use moo
+  return select_next_entry_moo();
 
 }
 
@@ -3117,6 +3237,7 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
   u32 tb4;
 
   child_timed_out = 0;
+  last_location = MAP_SIZE + 1;
 
   /* After this memset, trace_bits[] are effectively volatile, so we
      must prevent any earlier operations from venturing into that
@@ -3289,6 +3410,8 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
 
   /* Report outcome to caller. */
 
+  last_location = get_last_loc();
+
   if (WIFSIGNALED(status) && !stop_soon) {
 
     kill_signal = WTERMSIG(status);
@@ -3394,9 +3517,10 @@ static u8 check_unique_path() {
     }
     hashmap_insert(dfg_hashmap, checksum, NULL);
     update_dfg_count_map(NULL);
-    if (vertical_experiment) {
-      struct hashmap *local_hashmap = hashmap_create(8);
-      hashmap_insert(vertical_hashmap, checksum, local_hashmap);
+    if (vertical_experiment || vertical_use_dynamic) {
+      struct vertical_entry *ve = vertical_entry_create(checksum);
+      hashmap_insert(vertical_manager->map, checksum, ve);
+      LOGF("[vertical] [entry-add] [id %u] [checksum %u]\n", hashmap_size(vertical_manager->map), checksum);
     }
     return 1;
   }
@@ -3435,9 +3559,17 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 covered[100] = "";
   u8 *tmp_argv1 = "";
 
-  // SAYF("[pacfix] [cov] [crashed %u] [cov %u]\n", crashed, check_covered_target());
-  if (!crashed) return check_covered_target();
-  // if (crashed && !check_covered_target()) return 0;
+  u8 coverage_result = check_covered_target();
+  if (!crashed) return coverage_result;
+  if (crashed && !coverage_result) return 0;
+
+  for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+    if (dfg_targets[i] > MAP_SIZE) return 0;
+    else if (dfg_targets[i] == last_location) {
+      SAYF("[pacfix] [cov] [crash 1] [result 1]\n");
+      return 1;
+    }
+  }
 
   u8 fault_tmp;
   u32 line = 0;
@@ -3482,9 +3614,12 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
     remove(tmpfile);
     ck_free(tmpfile);
     ck_free(cmd);
-    if (result == NULL) return 1;
-    if(sscanf(covered, "__localize: %d", &parsed_line) != 1) return 1;
-    if(parsed_line == line) return 1;
+    if (result == NULL) return 0;
+    if(sscanf(covered, "__localize: %d", &parsed_line) != 1) return 0;
+    if(parsed_line == line) {
+      LOGF("[cov] [new %u] [old 1]\n", coverage_result);
+      return 1;
+    }
     else return 0;
   } else {
     cmd = alloc_printf("grep \"%d\" %s | wc -l", line, tmpfile);
@@ -3506,7 +3641,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   }
 }
 
-static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cksum) {
+static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cksum, struct queue_entry* q) {
   u8 *valexe = "";
   u8 *covdir = "";
   u8 *tmpfile = "";
@@ -3538,25 +3673,40 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   }
 
   u32 hash = hash_file(tmpfile);
+  struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
+  if (q) {
+    LOGF("[vertical] [entry] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [crash %u] [time %llu] [last-loc %d]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(unique_mem_hashmap), crashed, get_cur_time() - start_time, q ? q->last_location : -1);
+  }
   // Check if the hash is already in the hashmap
-  if (vertical_experiment) {
-    struct key_value_pair* local_kvp = hashmap_get(vertical_hashmap, dfg_cksum);
+  if (vertical_experiment || vertical_use_dynamic) {
+    struct key_value_pair* local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
+    if (!local_kvp) {
+      struct vertical_entry *ve = vertical_entry_create(dfg_cksum);
+      hashmap_insert(vertical_manager->map, dfg_cksum, ve);
+      LOGF("[vertical] [entry-add-late] [id %u] [checksum %u]\n", hashmap_size(vertical_manager->map), dfg_cksum);
+      local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
+    }
     if (local_kvp) {
-      struct hashmap *local_valuation_hashmap = local_kvp->value;
+      struct vertical_entry *local_entry = local_kvp->value;
+      struct hashmap *local_valuation_hashmap = local_entry->value_map;
       struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
       if (local_valuation_kvp) {
+        if (q && !local_valuation_kvp->value) {
+          local_valuation_kvp->value = q;
+        }
         remove(tmpfile);
         ck_free(tmpfile);
         return 0;
       } else {
-        hashmap_insert(local_valuation_hashmap, hash, NULL);
-        LOGF("[vertical] [valuation] [seed %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
+        vertical_entry_add(vertical_manager, local_entry, q, kvp);
+        hashmap_insert(local_valuation_hashmap, hash, q);
+        LOGF("[vertical] [valuation] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
       }
     } else {
       SAYF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
     }
   }
-  struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
+
   if (kvp) {
     remove(tmpfile);
     ck_free(tmpfile);
@@ -3565,7 +3715,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
                                  crashed == 1 ? total_saved_crashes : total_saved_positives);
   hashmap_insert(unique_mem_hashmap, hash, NULL);
-  LOGF("[pacfix] [mem] [%s] [seed %u] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1,
+  LOGF("[pacfix] [mem] [%s] [seed %d] [entry %d] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1,
        crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
   vertical_is_new_valuation = 1;
@@ -3698,6 +3848,8 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   q->exec_us     = (stop_us - start_us) / stage_max;
   q->bitmap_size = count_bytes(trace_bits);
   compute_proximity_score(&q->prox_score, dfg_bits, 1);
+  total_prox_original += q->prox_score.original;
+  total_prox_cnt++;
   q->handicap    = handicap;
   q->cal_failed  = 0;
 
@@ -3799,7 +3951,15 @@ static void perform_dry_run(char** argv) {
     res = calibrate_case(argv, q, use_mem, 0, 1);
     u32 checksum = get_dfg_checksum();
     q->dfg_cksum = checksum;
-    LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s]\n", q->entry_id, checksum, res, q->fname);
+    q->last_location = last_location;
+    for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+      if (dfg_targets[i] > MAP_SIZE) {
+        dfg_targets[i] = last_location;
+      } else if (dfg_targets[i] == last_location) {
+        break;
+      }
+    }
+    LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s] [last-loc %u]\n", q->entry_id, checksum, res, q->fname, last_location);
 
     if (stop_soon) return;
 
@@ -3820,7 +3980,7 @@ static void perform_dry_run(char** argv) {
           if (dfg_node_info_map) {
             check_unique_path();
           }
-          get_valuation(0, argv, use_mem, q->len, checksum);
+          get_valuation(0, argv, use_mem, q->len, checksum, q);
         }
 
         break;
@@ -3870,7 +4030,7 @@ static void perform_dry_run(char** argv) {
           if (dfg_node_info_map) {
             check_unique_path();
           }
-          get_valuation(1, argv, use_mem, q->len, checksum);
+          get_valuation(1, argv, use_mem, q->len, checksum, q);
         }
 
         if (crash_mode) break;
@@ -4217,17 +4377,18 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8  keeping = 0, res;
   u8 has_valid_unique_path = 0;
   u8 save_to_file = 0;
+  struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
   u32 dfg_checksum = get_dfg_checksum();
   if (dfg_node_info_map) {
     has_valid_unique_path = check_unique_path();
     if (has_valid_unique_path) {
-      LOGF("[moo] [uniq-path] [seed %u] [moo-id %u]\n", queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap));
+      LOGF("[moo] [uniq-path] [seed %d] [moo-id %u]\n", queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap));
     }
   }
   if (vertical_experiment) {
     if (check_coverage(fault == FAULT_CRASH, argv, mem, len)) {
-      get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum);
+      get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum, NULL);
       return 1;
     }
     return 0;
@@ -4248,10 +4409,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       compute_proximity_score(&prox_score, dfg_bits, 0);
       vertical_is_interesting = 1;
       if (has_valid_unique_path) {
-          LOGF("[moo] [uniq] [seed %u] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
+          LOGF("[moo] [uniq] [seed %d] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
                 queue_cur ? queue_cur->entry_id : -1, queued_paths, hashmap_size(dfg_hashmap), prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
       } else {
-          LOGF("[moo] [no-uniq] [seed %u] [id %u] [cov %u] [prox %llu] [adj %f] [tgt %u] [mut %s] [time %llu]\n",
+          LOGF("[moo] [no-uniq] [seed %d] [id %u] [cov %u] [prox %llu] [adj %f] [tgt %u] [mut %s] [time %llu]\n",
                queue_cur ? queue_cur->entry_id : -1, queued_paths, prox_score.covered, prox_score.original, prox_score.adjusted, check_covered_target(), stage_short, get_cur_time() - start_time);
       }
 #ifndef SIMPLE_FILES
@@ -4267,6 +4428,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       add_to_queue(fn, len, 0, &prox_score);
 
+      new_seed = queue_last;
+
       if (hnb == 2) {
         queue_last->has_new_cov = 1;
         queued_with_cov++;
@@ -4274,8 +4437,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
       queue_last->dfg_cksum = get_dfg_checksum();
-      LOGF("[vertical] [save] [seed %u] [id %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu]\n",
-           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time);
+      queue_last->last_location = last_location;
+      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u]\n",
+           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, last_location);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
@@ -4365,7 +4529,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 keep_as_crash:
 
       if (!check_coverage(1, argv, mem, len)) return keeping;
-      save_to_file = get_valuation(1, argv, mem, len, dfg_checksum);
+      save_to_file = get_valuation(1, argv, mem, len, dfg_checksum, new_seed);
 
       /* This is handled in a manner roughly similar to timeouts,
          except for slightly different limits and no need to re-run test
@@ -4415,7 +4579,7 @@ keep_as_crash:
       break;
     case FAULT_NONE:
       if (!check_coverage(0, argv, mem, len)) return keeping;
-      save_to_file = get_valuation(0, argv, mem, len, dfg_checksum);
+      save_to_file = get_valuation(0, argv, mem, len, dfg_checksum, new_seed);
 
       total_normals++;
 
@@ -4442,7 +4606,7 @@ keep_as_crash:
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
   if (has_valid_unique_path || save_to_file) {
-    LOGF("[moo] [save] [seed %u] [moo-id %u] [fault %u] [path %u] [val %u] [file %s] [mut %s] [time %llu]\n",
+    LOGF("[moo] [save] [seed %d] [moo-id %u] [fault %u] [path %u] [val %u] [file %s] [mut %s] [time %llu]\n",
            queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap), fault, has_valid_unique_path, save_to_file, fn, stage_short, get_cur_time() - start_time);
     fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) PFATAL("Unable to create '%s'", fn);
@@ -5879,8 +6043,8 @@ static double calculate_factor(double prox_score) {
     p = normalized_prox_score * (1.0 - T) + 0.5 * T;
     factor = pow(2.0, 5.0 * 2.0 * (p - 0.5)); // Note log2(MAX_FACTOR) = 5.0
   }
-  else if (no_dfg_schedule || !avg_prox_score.original) factor = 1.0; // No factor.
-  else factor = (prox_score) / ((double) avg_prox_score.adjusted); // Default.
+  else if (no_dfg_schedule || !total_prox_cnt) factor = 1.0; // No factor.
+  else factor = (prox_score) / ((double) total_prox_original / (double) total_prox_cnt); // Default.
 
   return factor;
 
@@ -6166,8 +6330,8 @@ u32 convert_to_actual_location(u32 max, u32 sel) {
 u32 select_location_vertical(u32 max, double *rel) {
   u32 result = 0;
   if (max) {
-    if (use_vertical_navigation)
-      result = convert_to_actual_location(max, interval_tree_select(vertical_tree));
+    if (use_vertical_navigation || vertical_manager_get_mode(vertical_manager))
+      result = convert_to_actual_location(max, interval_tree_select(vertical_manager->tree));
     else
       result = UR(max);
     *rel = (double) result / (double) max;
@@ -6195,7 +6359,7 @@ void log_mutator_selection(u32* mutator, double* location, u32 stacking) {
       mut_cnt[mut] = 1;
     }
     // Update score for location
-    interval_tree_insert(vertical_tree, quantize_location(location[i]), score);
+    interval_tree_insert(vertical_manager->tree, quantize_location(location[i]), score);
   }
 }
 
@@ -7331,7 +7495,7 @@ static u8 fuzz_one_vertical(char** argv) {
   if (!splice_cycle) {
 
     /* Adjust perf_score with the factor derived from the proximity score */
-    double prox_score = queue_cur->prox_score.adjusted;
+    double prox_score = (double)queue_cur->prox_score.original;
     perf_score = (u32) (calculate_factor(prox_score) * (double) perf_score);
 
     stage_name  = "havoc-vertical";
@@ -9687,11 +9851,6 @@ abandon_entry:
 static u8 fuzz_one(char **argv) {
   int key_val_lv = 0;
   key_val_lv = fuzz_one_vertical(argv);
-//  if (use_vertical_navigation)
-//    key_val_lv = fuzz_one_vertical(argv);
-//  else
-//    key_val_lv = fuzz_one_original(argv);
-
   return key_val_lv;
 }
 
@@ -10811,8 +10970,7 @@ void init_vertical_navigation() { // initialize vertical navigation
   memset(moo_operator_persistent, 0, sizeof(moo_operator_persistent));
   memset(moo_operator_val, 0, sizeof(moo_operator_val));
   memset(moo_operator_total, 0, sizeof(moo_operator_total));
-  vertical_tree = interval_tree_create();
-  vertical_hashmap = hashmap_create(max_queue_size);
+  vertical_manager = vertical_manager_create();
 
 }
 
@@ -11070,7 +11228,7 @@ int main(int argc, char** argv) {
       break;
 
     case 'z':
-      vertical_use_full = 1;
+      vertical_use_dynamic = 1;
       break;
 
     default:
@@ -11281,6 +11439,7 @@ stop_fuzzing:
   destroy_extras();
   hashmap_free(dfg_hashmap);
   hashmap_free(unique_mem_hashmap);
+  vertical_manager_free(vertical_manager);
   ck_free(target_path);
   ck_free(sync_id);
   ck_free(dfg_count_map);
