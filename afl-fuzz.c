@@ -3566,7 +3566,6 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
     if (dfg_targets[i] > MAP_SIZE) return 0;
     else if (dfg_targets[i] == last_location) {
-      SAYF("[pacfix] [cov] [crash 1] [result 1]\n");
       return 1;
     }
   }
@@ -3955,6 +3954,7 @@ static void perform_dry_run(char** argv) {
     for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
       if (dfg_targets[i] > MAP_SIZE) {
         dfg_targets[i] = last_location;
+        break;
       } else if (dfg_targets[i] == last_location) {
         break;
       }
