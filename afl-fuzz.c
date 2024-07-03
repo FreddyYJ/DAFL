@@ -10463,6 +10463,9 @@ EXP_ST void setup_dirs_fds(void) {
   if (fd < 0) PFATAL("Unable to create '%s'", tmp);
   moo_vertical_log_file = fdopen(fd, "w");
   ck_free(tmp);
+  LOGF("[options] [hor %d] [ver %d] [ve %d] [k %d] [r %f] [y %d] [v %d]\n", 
+      use_moo_scheduler, vertical_use_dynamic, vertical_experiment, proximity_score_allowance, proximity_score_reduction, 
+      vertical_experiment, use_vertical_navigation);
 
 }
 
