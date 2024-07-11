@@ -160,6 +160,9 @@ bool AFLCoverage::runOnModule(Module &M) {
   GlobalVariable *AFLPrevLoc = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_loc",
       0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+  
+  GlobalVariable *AFLMapDFGLastPtr = new GlobalVariable(M, PointerType::get(Int32Ty, 0), false,
+                         GlobalValue::ExternalLinkage, 0, "__afl_area_dfg_last_ptr");
 
   /* Instrument all the things! */
 
@@ -257,9 +260,9 @@ bool AFLCoverage::runOnModule(Module &M) {
       ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
 
       /* Record current location in AFLMapDFGPtr */
-      LoadInst *DFGMap = IRB.CreateLoad(AFLMapDFGPtr);
+      LoadInst *DFGMap = IRB.CreateLoad(AFLMapDFGLastPtr);
       DFGMap->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      ConstantInt *DFGMapIdx = ConstantInt::get(Int32Ty, DFG_MAP_SIZE - 1);
+      ConstantInt *DFGMapIdx = ConstantInt::get(Int32Ty, 0);
       Value *DFGMapPtrIdxCur = IRB.CreateGEP(DFGMap, DFGMapIdx);
       StoreInst *StoreCur = IRB.CreateStore(CurLoc, DFGMapPtrIdxCur);
       StoreCur->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));

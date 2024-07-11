@@ -169,7 +169,7 @@ static s32 forksrv_pid,               /* PID of the fork server           */
 EXP_ST u8* trace_bits;                /* SHM with code coverage bitmap    */
 EXP_ST u32* dfg_bits;                 /* SHM with DFG coverage bitmap     */
 EXP_ST u32 *dfg_count_map;            /* DFG count bitmap                 */
-EXP_ST u32 last_location = MAP_SIZE + 1;         /* Last location of the target      */
+EXP_ST u32* last_location;         /* Last location of the target      */
 
 EXP_ST u64 dfg_node_count[DFG_MAP_SIZE];  /* Node counts for DFG              */
 EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
@@ -185,6 +185,7 @@ static u8  var_bytes[MAP_SIZE];       /* Bytes that appear to be variable */
 static s32 shm_id;                    /* ID of the SHM for code coverage  */
 static s32 shm_id_dfg;                /* ID of the SHM for DFG coverage   */
 static s32 shm_id_dfg_count;          /* ID of the SHM for DFG path count      */
+static s32 shm_id_dfg_last;
 
 static volatile u8 stop_soon,         /* Ctrl-C pressed?                  */
                    clear_screen = 1,  /* Window resized?                  */
@@ -1901,6 +1902,7 @@ static void remove_shm(void) {
   shmctl(shm_id, IPC_RMID, NULL);
   shmctl(shm_id_dfg, IPC_RMID, NULL);
   shmctl(shm_id_dfg_count, IPC_RMID, NULL);
+  shmctl(shm_id_dfg_last, IPC_RMID, NULL);
 
 }
 
@@ -2297,6 +2299,7 @@ EXP_ST void setup_shm(void) {
   u8* shm_str;
   u8* shm_str_dfg;
   u8* shm_str_dfg_count;
+  u8* shm_str_dfg_last;
 
   if (!in_bitmap) memset(virgin_bits, 255, MAP_SIZE);
 
@@ -2306,8 +2309,10 @@ EXP_ST void setup_shm(void) {
   shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
   shm_id_dfg = shmget(IPC_PRIVATE, sizeof(u32) * DFG_MAP_SIZE,
                       IPC_CREAT | IPC_EXCL | 0600);
-  shm_id_dfg_count = shmget(IPC_PRIVATE, sizeof(u64) * DFG_MAP_SIZE,
+  shm_id_dfg_count = shmget(IPC_PRIVATE, sizeof(u32) * DFG_MAP_SIZE,
                             IPC_CREAT | IPC_EXCL | 0600);
+  shm_id_dfg_last = shmget(IPC_PRIVATE, sizeof(u64),
+                           IPC_CREAT | IPC_EXCL | 0600);
 
   if (shm_id < 0) PFATAL("shmget() failed");
 
@@ -2316,6 +2321,7 @@ EXP_ST void setup_shm(void) {
   shm_str = alloc_printf("%d", shm_id);
   shm_str_dfg = alloc_printf("%d", shm_id_dfg);
   shm_str_dfg_count = alloc_printf("%d", shm_id_dfg_count);
+  shm_str_dfg_last = alloc_printf("%d", shm_id_dfg_last);
 
   /* If somebody is asking us to fuzz instrumented binaries in dumb mode,
      we don't want them to detect instrumentation, since we won't be sending
@@ -2325,16 +2331,20 @@ EXP_ST void setup_shm(void) {
   if (!dumb_mode) setenv(SHM_ENV_VAR, shm_str, 1);
   if (!dumb_mode) setenv(SHM_ENV_VAR_DFG, shm_str_dfg, 1);
   if (!dumb_mode) setenv(SHM_ENV_VAR_DFG_COUNT, shm_str_dfg_count, 1);
+  if (!dumb_mode) setenv(SHM_ENV_VAR_DFG_LAST, shm_str_dfg_last, 1);
 
   ck_free(shm_str);
   ck_free(shm_str_dfg);
   ck_free(shm_str_dfg_count);
+  ck_free(shm_str_dfg_last);
 
   trace_bits = shmat(shm_id, NULL, 0);
   dfg_bits = shmat(shm_id_dfg, NULL, 0);
+  last_location = shmat(shm_id_dfg_last, NULL, 0);
 
   if (trace_bits == (void *)-1) PFATAL("shmat() failed");
   if (dfg_bits == (void *)-1) PFATAL("shmat() failed");
+  if (last_location == (void *)-1) PFATAL("shmat() failed");
 
 }
 
@@ -3237,7 +3247,6 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
   u32 tb4;
 
   child_timed_out = 0;
-  last_location = MAP_SIZE + 1;
 
   /* After this memset, trace_bits[] are effectively volatile, so we
      must prevent any earlier operations from venturing into that
@@ -3245,6 +3254,7 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
 
   memset(trace_bits, 0, MAP_SIZE);
   memset(dfg_bits, 0, sizeof(u32) * DFG_MAP_SIZE);
+  *last_location = MAP_SIZE + 1;
   MEM_BARRIER();
 
   /* If we're running in "dumb" mode, we can't rely on the fork server
@@ -3410,8 +3420,6 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
 
   /* Report outcome to caller. */
 
-  last_location = get_last_loc();
-
   if (WIFSIGNALED(status) && !stop_soon) {
 
     kill_signal = WTERMSIG(status);
@@ -3565,7 +3573,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
 
   for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
     if (dfg_targets[i] > MAP_SIZE) return 0;
-    else if (dfg_targets[i] == last_location) {
+    else if (dfg_targets[i] == *last_location) {
       return 1;
     }
   }
@@ -3950,16 +3958,16 @@ static void perform_dry_run(char** argv) {
     res = calibrate_case(argv, q, use_mem, 0, 1);
     u32 checksum = get_dfg_checksum();
     q->dfg_cksum = checksum;
-    q->last_location = last_location;
+    q->last_location = *last_location;
     for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
       if (dfg_targets[i] > MAP_SIZE) {
-        dfg_targets[i] = last_location;
+        dfg_targets[i] = *last_location;
         break;
-      } else if (dfg_targets[i] == last_location) {
+      } else if (dfg_targets[i] == *last_location) {
         break;
       }
     }
-    LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s] [last-loc %u]\n", q->entry_id, checksum, res, q->fname, last_location);
+    LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s] [last-loc %u]\n", q->entry_id, checksum, res, q->fname, *last_location);
 
     if (stop_soon) return;
 
@@ -4437,9 +4445,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
       queue_last->dfg_cksum = get_dfg_checksum();
-      queue_last->last_location = last_location;
+      queue_last->last_location = *last_location;
       LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u]\n",
-           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, last_location);
+           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
