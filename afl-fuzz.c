@@ -989,12 +989,6 @@ struct vertical_manager *vertical_manager_create() {
   return manager;
 }
 
-static u32 get_last_loc() {
-  u32 loc = dfg_bits[DFG_MAP_SIZE - 1];
-  dfg_bits[DFG_MAP_SIZE - 1] = 0;
-  return loc;
-}
-
 /* Insert a test case to the queue, preserving the sorted order based on the
  * proximity score. Updates global variables 'queue', 'shortcut_per_100', and
  * 'first_unhandled'. */
