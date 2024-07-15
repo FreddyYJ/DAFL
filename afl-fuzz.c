@@ -3708,6 +3708,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
           ck_free(tmpfile);
           return 0;
         } else {
+          vertical_is_new_valuation = 1;
           vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
           hashmap_insert(local_valuation_hashmap, hash, q);
           LOGF("[vertical] [valuation] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
