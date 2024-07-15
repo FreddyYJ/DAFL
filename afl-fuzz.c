@@ -300,6 +300,7 @@ static s32 queue_rank = -1;           /* Rank of the queue entry           */
 static u8 use_moo_scheduler = 1;      /* Scheduling mode                  */
 static u32 moo_cycle = 0;             /* Current moo cycle                */
 static u8 use_dafl_coverage = 0;      /* Use dfg_bits for checking unique path */
+static u8 no_unique_val = 0;            /* Do not consider uniqueness in valuation */
 
 static struct queue_entry*
   first_unhandled;                    /* 1st unhandled item in the queue  */
@@ -2076,7 +2077,7 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
     // Pop from old
     entry = manager->old;
     manager->old = NULL;
-    manager->head =entry->next;
+    manager->head = entry->next;
     entry->use_count++;
     entry->next = NULL;
   }
@@ -2238,7 +2239,7 @@ static struct queue_entry* select_next_entry_moo() {
     struct vector *pareto_frontier_vec = vector_create();
     for (u32 i = 0; i < vector_size(dominated_vec); i++) {
       struct queue_entry *entry = vector_get(dominated_vec, i);
-      LOGF("[sche] [pareto] [id %u] [rank %d] [min %u]\n", entry->entry_id, entry->rank, queue_rank);
+      // LOGF("[sche] [pareto] [id %u] [rank %d] [min %u]\n", entry->entry_id, entry->rank, queue_rank);
       if (entry->rank == queue_rank) {
         vector_set(dominated_vec, i, NULL);
         push_back(pareto_frontier_vec, entry);
@@ -3678,6 +3679,9 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   if (q) {
     LOGF("[vertical] [entry] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [crash %u] [time %llu] [last-loc %d]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(unique_mem_hashmap), crashed, get_cur_time() - start_time, q ? q->last_location : -1);
   }
+  if (no_unique_val) {
+    LOGF("[nuv] [dfg-path %u] [hash %u] [seed %d] [crash %u] [time %llu]\n", dfg_cksum, hash, queue_cur ? queue_cur->entry_id : -1, crashed, get_cur_time() - start_time);
+  }
   // Check if the hash is already in the hashmap
   if (vertical_experiment || vertical_use_dynamic) {
     struct key_value_pair* local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
@@ -3691,17 +3695,23 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
       struct vertical_entry *local_entry = local_kvp->value;
       struct hashmap *local_valuation_hashmap = local_entry->value_map;
       struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
-      if (local_valuation_kvp) {
-        if (q && !local_valuation_kvp->value) {
-          local_valuation_kvp->value = q;
-        }
-        remove(tmpfile);
-        ck_free(tmpfile);
-        return 0;
+      if (no_unique_val) {
+        vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
+        if (!local_valuation_kvp)
+          hashmap_insert(local_valuation_hashmap, hash, q);
       } else {
-        vertical_entry_add(vertical_manager, local_entry, q, kvp);
-        hashmap_insert(local_valuation_hashmap, hash, q);
-        LOGF("[vertical] [valuation] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
+        if (local_valuation_kvp) {
+          if (q && !local_valuation_kvp->value) {
+            local_valuation_kvp->value = q;
+          }
+          remove(tmpfile);
+          ck_free(tmpfile);
+          return 0;
+        } else {
+          vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
+          hashmap_insert(local_valuation_hashmap, hash, q);
+          LOGF("[vertical] [valuation] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
+        }
       }
     } else {
       SAYF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
@@ -11005,7 +11015,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:vzy")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzy")) > 0)
 
     switch (opt) {
 
@@ -11222,6 +11232,14 @@ int main(int argc, char** argv) {
 
     case 'p':    /* Set dfg_node_info_file */
       dfg_node_info_file = optarg;
+      break;
+
+    case 'u':
+      if (optarg[0] == 'n') {
+        no_unique_val = 1;
+      } else {
+        no_unique_val = 0;
+      }
       break;
 
     case 'v':    /* Vertical navigation mode */
