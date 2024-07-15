@@ -373,6 +373,13 @@ struct vertical_entry *vertical_entry_create(u32 hash) {
 void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
   if (!q) return;
   if (vector_size(entry->entries) == 0) {
+    entry->next = manager->head;
+    manager->head = entry;
+  }
+  push_back(entry->entries, q);
+  return;
+  // old code
+  if (vector_size(entry->entries) == 0) {
     push_back(entry->entries, q);
     // This is the first seed for this dug-path
     // Insert the entry to the queue
