@@ -3964,14 +3964,6 @@ static void perform_dry_run(char** argv) {
     u32 checksum = get_dfg_checksum();
     q->dfg_cksum = checksum;
     q->last_location = *last_location;
-    for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
-      if (dfg_targets[i] > MAP_SIZE) {
-        dfg_targets[i] = *last_location;
-        break;
-      } else if (dfg_targets[i] == *last_location) {
-        break;
-      }
-    }
     LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s] [last-loc %u]\n", q->entry_id, checksum, res, q->fname, *last_location);
 
     if (stop_soon) return;
@@ -4038,6 +4030,16 @@ static void perform_dry_run(char** argv) {
         }
 
       case FAULT_CRASH:
+        if (check_covered_target()) {
+          for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+            if (dfg_targets[i] > MAP_SIZE) {
+              dfg_targets[i] = *last_location;
+              break;
+            } else if (dfg_targets[i] == *last_location) {
+              break;
+            }
+          }
+        }
 
         if (check_coverage(1, argv, use_mem, q->len)) {
           if (dfg_node_info_map) {
