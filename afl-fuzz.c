@@ -413,6 +413,9 @@ static u64 get_cur_time_us(void) {
 
 }
 
+u8 check_res(u8 res) {
+  return res == FAULT_CRASH || res == FAULT_NONE;
+}
 
 /* Generate a random number (from 0 to limit - 1). This may
    have slight bias. */
@@ -3938,6 +3941,7 @@ static void perform_dry_run(char** argv) {
 
   struct queue_entry* q = queue;
   u32 cal_failures = 0;
+  u8 has_crashing_seed = 0;
   u8* skip_crashes = getenv("AFL_SKIP_CRASHES");
 
   while (q) {
@@ -3977,8 +3981,6 @@ static void perform_dry_run(char** argv) {
       case FAULT_NONE:
 
         if (q == queue) check_map_coverage();
-
-        if (!vertical_experiment && crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);
 
         if (check_coverage(0, argv, use_mem, q->len)) {
 
@@ -4030,6 +4032,8 @@ static void perform_dry_run(char** argv) {
         }
 
       case FAULT_CRASH:
+        has_crashing_seed = 1;
+
         if (check_covered_target()) {
           for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
             if (dfg_targets[i] > MAP_SIZE) {
@@ -4145,6 +4149,9 @@ static void perform_dry_run(char** argv) {
     ck_free(use_mem);
 
   }
+
+  if (!vertical_experiment && crash_mode && !has_crashing_seed)
+    FATAL("All test cases did *NOT* crash: invalid -C setting?");
 
   if (cal_failures) {
 
@@ -6487,7 +6494,7 @@ static u8 fuzz_one_vertical(char** argv) {
 
     }
 
-    if (stop_soon || res != crash_mode) {
+    if (stop_soon || check_res(res)) {
       cur_skipped_paths++;
       goto abandon_entry;
     }
@@ -8263,7 +8270,7 @@ static u8 fuzz_one_original(char** argv) {
 
     }
 
-    if (stop_soon || res != crash_mode) {
+    if (stop_soon || check_res(res)) {
       cur_skipped_paths++;
       goto abandon_entry;
     }
