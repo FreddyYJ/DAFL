@@ -414,7 +414,7 @@ static u64 get_cur_time_us(void) {
 }
 
 u8 check_res(u8 res) {
-  return res == FAULT_CRASH || res == FAULT_NONE;
+  return !(res == FAULT_CRASH || res == FAULT_NONE);
 }
 
 /* Generate a random number (from 0 to limit - 1). This may
