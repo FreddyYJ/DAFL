@@ -2090,7 +2090,7 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
 u8 vertical_manager_select_mode(struct vertical_manager *manager)  {
   if (manager->head == NULL && manager->old == NULL) return 0;
   if (!manager->dynamic_mode) {
-    if (get_cur_time() - manager->start_time > 30 * 60 * 1000) {
+    if (get_cur_time() - manager->start_time > 15 * 60 * 1000) {
       manager->dynamic_mode = 1;
     } else {
       return 0;
@@ -3049,9 +3049,15 @@ EXP_ST void init_forkserver(char** argv) {
     /* Set sane defaults for ASAN if nothing else specified. */
 
     setenv("ASAN_OPTIONS", "abort_on_error=1:"
+                           "halt_on_error=1:"
                            "detect_leaks=0:"
                            "symbolize=0:"
                            "allocator_may_return_null=1", 0);
+    
+    setenv("UBSAN_OPTIONS", "abort_on_error=1:"
+                            "halt_on_error=1:"
+                            "exitcode=54:"
+                            "print_stacktrace=1", 0);
 
     /* MSAN is tricky, because it doesn't support abort_on_error=1 at this
        point. So, we do this in a very hacky way. */
@@ -3059,6 +3065,7 @@ EXP_ST void init_forkserver(char** argv) {
     setenv("MSAN_OPTIONS", "exit_code=" STRINGIFY(MSAN_ERROR) ":"
                            "symbolize=0:"
                            "abort_on_error=1:"
+                           "halt_on_error=1:"
                            "allocator_may_return_null=1:"
                            "msan_track_origins=0", 0);
 
@@ -3320,8 +3327,9 @@ static u8 run_target(char** argv, u32 timeout, char* env_opt, u8 force_dumb_mode
 
       char *envp[] =
       {
-          "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0:allocator_may_return_null=1",
-          "MSAN_OPTIONS=exit_code=86:symbolize=0:msan_track_origins=0",
+          "ASAN_OPTIONS=abort_on_error=1:halt_on_error=1:detect_leaks=0:symbolize=0:allocator_may_return_null=1",
+          "MSAN_OPTIONS=exit_code=86:halt_on_error=1:symbolize=0:msan_track_origins=0",
+          "UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1:exit_code=54:print_stacktrace=1",
           env_opt,
           0
       };
@@ -3672,7 +3680,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   argv[0] = tmp_argv1;
   ck_free(tmpfile_env);
 
-  if (access(tmpfile, F_OK) != 0) {
+  if (fault_tmp == FAULT_TMOUT || access(tmpfile, F_OK) != 0) {
     ck_free(tmpfile);
     return 0;
   }
