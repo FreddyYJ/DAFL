@@ -3681,6 +3681,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   ck_free(tmpfile_env);
 
   if (fault_tmp == FAULT_TMOUT || access(tmpfile, F_OK) != 0) {
+    // SAYF("[val] [fail] [timeout %d] [no-file %d] [time %llu]\n", fault_tmp == FAULT_TMOUT, access(tmpfile, F_OK) != 0, get_cur_time() - start_time);
     ck_free(tmpfile);
     return 0;
   }
@@ -3871,6 +3872,8 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   q->exec_us     = (stop_us - start_us) / stage_max;
   q->bitmap_size = count_bytes(trace_bits);
   compute_proximity_score(&q->prox_score, dfg_bits, 1);
+  if (q->base_crash_seed) return fault;
+
   total_prox_original += q->prox_score.original;
   total_prox_cnt++;
   q->handicap    = handicap;
@@ -3886,7 +3889,6 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   // if (max_prox_score < q->prox_score) max_prox_score = q->prox_score;
   // update_dfg_score(q);
   update_dfg_count_map(q);
-
   update_bitmap_score(q);
 
   /* If this case didn't result in new output from the instrumentation, tell
@@ -3945,12 +3947,46 @@ static void check_map_coverage(void) {
 /* Perform dry run of all test cases to confirm that the app is working as
    expected. This is done only for the initial inputs, and only once. */
 
-static void perform_dry_run(char** argv) {
+static void perform_dry_run(char** argv, char *base_crash_seed) {
 
   struct queue_entry* q = queue;
   u32 cal_failures = 0;
   u8 has_crashing_seed = 0;
   u8* skip_crashes = getenv("AFL_SKIP_CRASHES");
+
+  if (base_crash_seed) {
+
+    s32 fd = open(base_crash_seed, O_RDONLY);
+    if (fd < 0) PFATAL("Unable to open base crash seed '%s'", base_crash_seed);
+    struct stat st;
+    if (fstat(fd, &st) < 0) PFATAL("fstat() failed");
+    u64 len = st.st_size;
+    u8* use_mem = ck_alloc_nozero(len);
+    if (read(fd, use_mem, len) != len) FATAL("Short read from '%s'", base_crash_seed);
+    close(fd);
+
+    struct queue_entry base_entry;
+    memset(&base_entry, 0, sizeof(struct queue_entry));
+    base_entry.fname = base_crash_seed;
+    base_entry.len = len;
+    base_entry.base_crash_seed = 1;
+    u8 res = calibrate_case(argv, &base_entry, use_mem, 0, 1);
+    if (res != FAULT_CRASH) PFATAL("Base crash seed *does not* crash");
+    has_crashing_seed = 1;
+
+    u32 checksum = get_dfg_checksum();
+    if (check_covered_target()) {
+      for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+        if (dfg_targets[i] > MAP_SIZE) {
+          dfg_targets[i] = *last_location;
+          break;
+        } else if (dfg_targets[i] == *last_location) {
+          break;
+        }
+      }
+    }
+
+  }
 
   while (q) {
 
@@ -11022,6 +11058,7 @@ int main(int argc, char** argv) {
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
   char** use_argv;
+  char* base_crash_seed = NULL;  /* Base seed for crash exploration   */
 
   struct timeval tv;
   struct timezone tz;
@@ -11033,7 +11070,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzy")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:")) > 0)
 
     switch (opt) {
 
@@ -11272,6 +11309,10 @@ int main(int argc, char** argv) {
       vertical_use_dynamic = 1;
       break;
 
+    case 'b':
+      base_crash_seed = optarg;
+      break;
+
     default:
 
       usage(argv[0]);
@@ -11362,7 +11403,7 @@ int main(int argc, char** argv) {
   else
     use_argv = argv + optind;
 
-  perform_dry_run(use_argv);
+  perform_dry_run(use_argv, base_crash_seed);
 
   cull_queue();
 

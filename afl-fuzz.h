@@ -38,7 +38,8 @@ struct queue_entry {
   var_behavior,                   /* Variable behavior?               */
   favored,                        /* Currently favored?               */
   fs_redundant,                   /* Marked as redundant in the fs?   */
-  removed;                        /* Removed from queue?              */
+  removed,                        /* Removed from queue?              */
+  base_crash_seed;                /* Part of the initial test case?   */
 
   u32 bitmap_size,                    /* Number of bits set in bitmap     */
   exec_cksum,                     /* Checksum of the execution trace  */
