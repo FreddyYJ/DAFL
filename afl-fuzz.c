@@ -109,6 +109,9 @@ static u8 vertical_is_new_valuation = 0;
 static u8 vertical_use_dynamic = 0;
 static u8 vertical_experiment = 0;
 
+static u64 explore_time = 15 * 60 * 1000; // 15 minutes
+static u64 use_explore = 1;
+
 static struct vertical_manager *vertical_manager = NULL;
 // End vertical navigation
 
@@ -2090,7 +2093,7 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
 u8 vertical_manager_select_mode(struct vertical_manager *manager)  {
   if (manager->head == NULL && manager->old == NULL) return 0;
   if (!manager->dynamic_mode) {
-    if (get_cur_time() - manager->start_time > 15 * 60 * 1000) {
+    if (get_cur_time() - manager->start_time > explore_time) {
       manager->dynamic_mode = 1;
     } else {
       return 0;
@@ -11070,7 +11073,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:g")) > 0)
 
     switch (opt) {
 
@@ -11311,6 +11314,14 @@ int main(int argc, char** argv) {
 
     case 'b':
       base_crash_seed = optarg;
+      break;
+    
+    case 'a':
+      explore_time = atoi(optarg) * 60 * 1000;
+      break;
+    
+    case 'g':
+      use_explore = 0;
       break;
 
     default:
