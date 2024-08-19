@@ -2192,21 +2192,59 @@ struct queue_entry *vertical_manager_explore_pareto_frontier(struct vertical_man
       pareto_rank = MIN(pareto_rank, entry->rank_explore);
     }
     struct vector *pareto_frontier = manager->explore_pareto_frontier;
+    u32 pareto_index = 0;
+    u32 dominated_index = 0;
     for (u32 i = 0; i < dominated_size; i++) {
       struct queue_entry *entry = vector_get(dominated, i);
       if (entry->rank_explore == pareto_rank) {
         push_back(pareto_frontier, entry);
         vector_set(dominated, i, NULL);
+        pareto_info_set(&entry->explore_info, PARETO_FRONTIER, pareto_index++);
+      } else {
+        pareto_info_set(&entry->explore_info, PARETO_DOMINATED, dominated_index++);
       }
     }
     vector_reduce(dominated);
   }
+
   struct queue_entry *selected = vector_pop_back(manager->explore_pareto_frontier);
-  if (!selected) {
+  if (selected) {
     push_back(manager->explore_recycled, selected);
+    pareto_info_set(&selected->explore_info, PARETO_RECYCLED, vector_size(manager->explore_recycled) - 1);
+    LOGF("[sel] [explore] [id %d] [dfg-path %u] [dfg-path-count %llu] [time %llu]\n", 
+      selected->entry_id, selected->dfg_cksum, 
+      vertical_manager_get_dfg_count(vertical_manager, selected->dfg_cksum), get_cur_time() - start_time);
   }
   return selected;
 }
+
+void vertical_manager_explore_remove(struct vertical_manager *manager, struct queue_entry *entry) {
+  // Remove the entry
+  if (entry == NULL) return;
+  struct vector *vec = NULL;
+  switch (entry->explore_info.status) {
+    case PARETO_FRONTIER:
+      vec = manager->explore_pareto_frontier;
+      break;
+    case PARETO_DOMINATED:
+      vec = manager->explore_dominated;
+      break;
+    case PARETO_NEWLY_ADDED:
+      vec = manager->explore_newly_added;
+      break;
+    default:
+      return;
+  }
+  u32 index = entry->explore_info.index;
+  struct queue_entry *removed = vector_pop(vec, index);
+  if (removed != entry) {
+    LOGF("[error] [explore] [remove] [id %d] [status %d] [index %d] [removed %d] [time %llu]\n", 
+      entry->entry_id, entry->explore_info.status, entry->explore_info.index, removed ? removed->entry_id : -1, get_cur_time() - start_time);
+  }
+  push_back(manager->explore_recycled, entry);
+  pareto_info_set(&entry->explore_info, PARETO_RECYCLED, vector_size(manager->explore_recycled) - 1);
+}
+
 
 static struct queue_entry* select_next_entry_dafl() {
   struct queue_entry* q = NULL;
@@ -2227,9 +2265,12 @@ static struct queue_entry* select_next_entry_dafl() {
 static void move_entry_to_recycled(struct queue_entry *prev_entry) {
   // Remove this entry from moo queue
   if (!prev_entry) return;
+  if (pareto_frontier_queue == NULL && newly_added_queue == NULL && dominated_queue == NULL) {
+    return;
+  }
   struct queue_entry *q = recycled_queue;
   while (q) {
-    if (q == prev_entry) {
+    if (q == prev_entry) { // Already in recyled queue
       return;
     }
     q = q->next_moo;
@@ -2269,9 +2310,6 @@ static struct queue_entry* select_next_entry_vertical() {
   if (vector_size(entry->entries) > 0) {
     // push back to the old queue
     vertical_manager_insert_to_old(vertical_manager, entry);
-  }
-  if (!q) {
-    move_entry_to_recycled(q);
   }
   LOGF("[sel] [vertical] [id %d] [dfg-path %u] [time %llu]\n", q ? q->entry_id : -1, entry->hash, get_cur_time() - start_time);
   return q;
@@ -2381,6 +2419,24 @@ static struct queue_entry* select_next_entry_explore() {
   return vertical_manager_explore_pareto_frontier(vertical_manager);
 }
 
+static void handle_selected_entry(enum VerticalMode mode, struct queue_entry *entry) {
+  if (entry == NULL) return;
+
+  if (mode != M_EXP && use_explore) {
+    // Handle explore
+    vertical_manager_explore_remove(vertical_manager, entry);
+  }
+  
+  if (mode != M_VER) {
+    // Handle vertical
+  }
+
+  if (mode != M_HOR) {
+    // Handle horizontal
+    move_entry_to_recycled(entry);
+  }
+}
+
 static struct queue_entry* select_next_entry() {
 
   struct queue_entry *selected_entry = NULL;
@@ -2406,6 +2462,7 @@ static struct queue_entry* select_next_entry() {
     default:
       break;
     }
+    handle_selected_entry(mode, selected_entry);
   }
 
   if (selected_entry)

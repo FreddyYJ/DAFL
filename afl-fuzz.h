@@ -24,6 +24,24 @@ struct dfg_node_info {
   u32 max_paths;
 };
 
+enum ParetoStatus {
+  PARETO_UNINITIALIZED = 0,
+  PARETO_FRONTIER = 1,
+  PARETO_DOMINATED = 2,
+  PARETO_NEWLY_ADDED = 3,
+  PARETO_RECYCLED = 4,
+};
+
+struct pareto_info {
+  enum ParetoStatus status;
+  u32 index;
+};
+
+void pareto_info_set(struct pareto_info *info, enum ParetoStatus status, u32 index) {
+  info->status = status;
+  info->index = index;
+}
+
 struct queue_entry {
 
   u8* fname;                          /* File name for the test case      */
@@ -62,6 +80,8 @@ struct queue_entry {
   struct queue_entry *next;           /* Next element, if any             */
   struct queue_entry *next_moo;       /* Next element in the MOO queue    */
   struct queue_entry *prev_moo;       /* Prev element in MOO queue */
+
+  struct pareto_info explore_info;   /* Pareto info for explore mode */
 
 };
 
@@ -180,14 +200,19 @@ struct queue_entry * vector_pop_back(struct vector *vec) {
   return vec->data[vec->size];
 }
 
-struct queue_entry * vector_pop_front(struct vector *vec) {
-  if (vec->size == 0) return NULL;
-  struct queue_entry *entry = vec->data[0];
-  for (u32 i = 0; i < vec->size - 1; i++) {
+struct queue_entry *vector_pop(struct vector *vec, u32 index) {
+  if (index >= vec->size) return NULL;
+  if (index == vec->size - 1) return vector_pop_back(vec);
+  struct queue_entry *entry = vec->data[index];
+  for (u32 i = index; i < vec->size - 1; i++) {
     vec->data[i] = vec->data[i + 1];
   }
   vec->size--;
   return entry;
+}
+
+struct queue_entry * vector_pop_front(struct vector *vec) {
+  return vector_pop(vec, 0);
 }
 
 void vector_free(struct vector* vec) {
@@ -501,9 +526,12 @@ u64 vertical_manager_get_dfg_count(struct vertical_manager *manager, u32 dfg_pat
 
 void vertical_manager_explore_insert(struct vertical_manager *manager, struct queue_entry *entry) {
   push_back(manager->explore_newly_added, entry);
+  pareto_info_set(&entry->explore_info, PARETO_NEWLY_ADDED, vector_size(manager->explore_newly_added) - 1);
 }
 
 struct queue_entry *vertical_manager_explore_pareto_frontier(struct vertical_manager *manager);
+
+void vertical_manager_explore_remove(struct vertical_manager *manager, struct queue_entry *entry);
 
 void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry) {
   if (manager->old == NULL) {
