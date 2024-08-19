@@ -299,7 +299,6 @@ static struct queue_entry *newly_added_queue;
 static struct queue_entry *recycled_queue;
 static struct queue_entry *dominated_queue;
 
-static s32 queue_rank = -1;           /* Rank of the queue entry           */
 static u8 use_moo_scheduler = 1;      /* Scheduling mode                  */
 static u32 moo_cycle = 0;             /* Current moo cycle                */
 static u8 use_dafl_coverage = 0;      /* Use dfg_bits for checking unique path */
@@ -990,6 +989,13 @@ struct vertical_manager *vertical_manager_create() {
   manager->head = NULL;
   manager->old = NULL;
   manager->tree = interval_tree_create();
+  // For exploration
+  manager->count_dfg_path = hashmap_create(4096);
+  manager->explore_pareto_frontier = vector_create();
+  manager->explore_dominated = vector_create();
+  manager->explore_newly_added = vector_create();
+  manager->explore_recycled = vector_create();
+
   manager->start_time = get_cur_time();
   manager->dynamic_mode = 0;
   manager->use_vertical = 0;
@@ -1078,7 +1084,6 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   q->prox_score.dfg_dense_map = NULL;
   q->prox_score.dfg_count_map = NULL;
   q->entry_id     = queued_paths;
-  q->rank         = queue_rank + 1;
   q->next = NULL;
   q->next_moo = NULL;
   q->prev_moo = NULL;
@@ -1086,6 +1091,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   if (q->depth > max_depth) max_depth = q->depth;
 
   if (use_moo_scheduler) moo_insert_to_queue(q);
+  if (use_explore) vertical_manager_explore_insert(vertical_manager, queue_last);
 
   sorted_insert_to_queue(q);
 
@@ -2071,6 +2077,24 @@ static void update_ranks(struct queue_entry *a, struct queue_entry *b) {
   }
 }
 
+static void update_ranks_explore(struct queue_entry *a, struct queue_entry *b) {
+  u32 a_path_count = 0;
+  u32 b_path_count = 0;
+  if (a->dfg_cksum != b->dfg_cksum) {
+    a_path_count = vertical_manager_get_dfg_count(vertical_manager, a->dfg_cksum);
+    b_path_count = vertical_manager_get_dfg_count(vertical_manager, b->dfg_cksum);
+  }
+  u32 a_sel_count = a->selection_count;
+  u32 b_sel_count = b->selection_count;
+  // path_count, sel_count: the smaller, the better
+  // rank_explore: the smaller, the better
+  if (a_path_count < b_path_count && a_sel_count < b_sel_count) {
+    b->rank_explore++;
+  } else if (a_path_count > b_path_count && a_sel_count > b_sel_count) {
+    a->rank_explore++;
+  }
+}
+
 struct vertical_entry *vertical_manager_select(struct vertical_manager *manager) {
   if (manager->head == NULL && manager->old == NULL) return NULL;
   // Pop from head
@@ -2090,20 +2114,99 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
   return entry;
 }
 
-u8 vertical_manager_select_mode(struct vertical_manager *manager)  {
-  if (manager->head == NULL && manager->old == NULL) return 0;
+enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager)  {
+  enum VerticalMode initial_mode = use_explore ? M_EXP : M_HOR;
+  if (manager->head == NULL && manager->old == NULL) return initial_mode;
   if (!manager->dynamic_mode) {
     if (get_cur_time() - manager->start_time > explore_time) {
       manager->dynamic_mode = 1;
     } else {
-      return 0;
+      return initial_mode;
     }
   }
   // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
   vertical_manager_set_mode(manager, !manager->use_vertical);
-  return manager->use_vertical;
+  return vertical_manager_get_mode(manager);
 }
 
+enum VerticalMode vertical_manager_get_mode(struct vertical_manager *manager) {
+  enum VerticalMode initial_mode = use_explore ? M_EXP : M_HOR;
+  if (manager->head == NULL && manager->old == NULL) return initial_mode;
+  if (!manager->dynamic_mode) return initial_mode;
+  return manager->use_vertical ? M_VER : M_HOR;
+}
+
+struct queue_entry *vertical_manager_explore_pareto_frontier(struct vertical_manager *manager) {
+  if (vector_size(manager->explore_pareto_frontier) == 0) {
+    // If the frontier is empty, select from dominated queue
+    struct vector *new_entries = manager->explore_newly_added;
+    struct vector *dominated = manager->explore_dominated;
+    u32 new_entries_size = vector_size(new_entries);
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *a = vector_get(new_entries, i);
+      for (u32 j = i + 1; j < new_entries_size; j++) {
+        struct queue_entry *b = vector_get(new_entries, j);
+        update_ranks_explore(a, b);
+      }
+    }
+    u32 dominated_size = vector_size(dominated);
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *a = vector_get(new_entries, i);
+      for (u32 j = 0; j < dominated_size; j++) {
+        struct queue_entry *b = vector_get(dominated, j);
+        update_ranks_explore(a, b);
+      }
+    }
+    // Add new entries to the dominated queue
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *nq = vector_get(new_entries, i);
+      push_back(dominated, nq);
+    }
+    vector_clear(new_entries);
+    dominated_size = vector_size(dominated);
+    // If the dominated queue is empty, select from the recycled queue
+    if (dominated_size == 0) {
+      struct vector *recycled = manager->explore_recycled;
+      u32 recycled_size = vector_size(recycled);
+      // reset rank_explore
+      for (u32 i = 0; i < recycled_size; i++) {
+        struct queue_entry *q = vector_get(recycled, i);
+        q->rank_explore = 0;
+      }
+      // Update the ranks
+      for (u32 i = 0; i < recycled_size; i++) {
+        struct queue_entry *a = vector_get(recycled, i);
+        push_back(dominated, a);
+        for (u32 j = i + 1; j < recycled_size; j++) {
+          struct queue_entry *b = vector_get(recycled, j);
+          update_ranks_explore(a, b);
+        }
+      }
+      vector_clear(recycled);
+    }
+    s32 pareto_rank = -1;
+    dominated_size = vector_size(dominated);
+    for (u32 i = 0; i < dominated_size; i++) {
+      struct queue_entry *entry = vector_get(dominated, i);
+      if (pareto_rank < 0) pareto_rank = entry->rank_explore;
+      pareto_rank = MIN(pareto_rank, entry->rank_explore);
+    }
+    struct vector *pareto_frontier = manager->explore_pareto_frontier;
+    for (u32 i = 0; i < dominated_size; i++) {
+      struct queue_entry *entry = vector_get(dominated, i);
+      if (entry->rank_explore == pareto_rank) {
+        push_back(pareto_frontier, entry);
+        vector_set(dominated, i, NULL);
+      }
+    }
+    vector_reduce(dominated);
+  }
+  struct queue_entry *selected = vector_pop_back(manager->explore_pareto_frontier);
+  if (!selected) {
+    push_back(manager->explore_recycled, selected);
+  }
+  return selected;
+}
 
 static struct queue_entry* select_next_entry_dafl() {
   struct queue_entry* q = NULL;
@@ -2177,6 +2280,7 @@ static struct queue_entry* select_next_entry_vertical() {
 static struct queue_entry* select_next_entry_moo() {
   // Use the MOO scheduler
   struct queue_entry *q = NULL;
+  s32 queue_rank = -1;
   if (!pareto_frontier_queue) {
     // If the pareto frontier queue is empty, select from the dominated queue
     // First, update the adjusted score
@@ -2202,7 +2306,7 @@ static struct queue_entry* select_next_entry_moo() {
     }
     for (u32 i = 0; i < new_entries_size; i++) {
       struct queue_entry *a = vector_get(new_entries, i);
-      for (u32 j = i + 1; j < dominated_size; j++) {
+      for (u32 j = 0; j < dominated_size; j++) {
         struct queue_entry *b = vector_get(dominated_vec, j);
         update_ranks(a, b);
       }
@@ -2236,7 +2340,6 @@ static struct queue_entry* select_next_entry_moo() {
       dominated_vec = recycled_vec;
     }
     // Construct the pareto frontier queue from the dominated queue
-    queue_rank = -1;
     for (u32 i = 0; i < vector_size(dominated_vec); i++) {
       struct queue_entry *entry = vector_get(dominated_vec, i);
       if (queue_rank < 0) queue_rank = entry->rank;
@@ -2272,7 +2375,15 @@ static struct queue_entry* select_next_entry_moo() {
   return q;
 }
 
+static struct queue_entry* select_next_entry_explore() {
+  // Pareto frontier for exploration
+  // Minimize q->selection_count, vertical_manager_get_dfg_path_count(manager, q->dfg_cksum)
+  return vertical_manager_explore_pareto_frontier(vertical_manager);
+}
+
 static struct queue_entry* select_next_entry() {
+
+  struct queue_entry *selected_entry = NULL;
 
   // Use the default dafl scheduler
   if (!use_moo_scheduler) {
@@ -2281,14 +2392,25 @@ static struct queue_entry* select_next_entry() {
 
   // Determine whether to use the vertical navigation
   if (vertical_use_dynamic) {
-    u8 use_vertical = vertical_manager_select_mode(vertical_manager);
-    if (use_vertical) {
-      struct queue_entry *q = select_next_entry_vertical();
-      if (q) return q;
+    enum VerticalMode mode = vertical_manager_select_mode(vertical_manager);
+    switch (mode) {
+    case M_EXP:
+      selected_entry = select_next_entry_explore();
+      break;
+    case M_VER:
+      selected_entry = select_next_entry_vertical();
+      break;
+    case M_HOR:
+      selected_entry = select_next_entry_moo();
+      break;
+    default:
+      break;
     }
   }
 
-  // Else: use moo
+  if (selected_entry)
+    return selected_entry;
+  // Fallback
   return select_next_entry_moo();
 
 }
@@ -4449,6 +4571,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
   u32 dfg_checksum = get_dfg_checksum();
+  vertical_manager_update_dfg_count(vertical_manager, dfg_checksum);
   if (dfg_node_info_map) {
     has_valid_unique_path = check_unique_path();
     if (has_valid_unique_path) {
@@ -6399,7 +6522,7 @@ u32 convert_to_actual_location(u32 max, u32 sel) {
 u32 select_location_vertical(u32 max, double *rel) {
   u32 result = 0;
   if (max) {
-    if (use_vertical_navigation || vertical_manager_get_mode(vertical_manager))
+    if (use_vertical_navigation || vertical_manager_get_mode(vertical_manager) == M_VER)
       result = convert_to_actual_location(max, interval_tree_select(vertical_manager->tree));
     else
       result = UR(max);
@@ -6924,7 +7047,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_FLIP32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP32] += stage_max;
 
-  skip_bitflip:
+skip_bitflip:
 
   if (no_arith) goto skip_arith;
 
@@ -7182,7 +7305,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_ARITH32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH32] += stage_max;
 
-  skip_arith:
+skip_arith:
 
   /**********************
    * INTERESTING VALUES *
@@ -7376,7 +7499,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_INTEREST32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST32] += stage_max;
 
-  skip_interest:
+skip_interest:
 
   /********************
    * DICTIONARY STUFF *
@@ -7491,7 +7614,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_EXTRAS_UI]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_UI] += stage_max;
 
-  skip_user_extras:
+skip_user_extras:
 
   if (!a_extras_cnt) goto skip_extras;
 
@@ -7542,7 +7665,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_EXTRAS_AO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_AO] += stage_max;
 
-  skip_extras:
+skip_extras:
 
   /* If we made this to here without jumping to havoc_stage or abandon_entry,
      we're properly done with deterministic steps and can mark it as such
@@ -7554,7 +7677,7 @@ static u8 fuzz_one_vertical(char** argv) {
    * RANDOM HAVOC *
    ****************/
 
-  havoc_stage:
+havoc_stage:
 
   stage_cur_byte = -1;
 
@@ -8094,7 +8217,7 @@ static u8 fuzz_one_vertical(char** argv) {
      splices them together at some offset, then relies on the havoc
      code to mutate that blob. */
 
-  retry_splicing:
+retry_splicing:
 
   if (use_splicing && splice_cycle++ < SPLICE_CYCLES &&
       queued_paths > 1 && queue_cur->len > 1) {
@@ -8182,7 +8305,9 @@ static u8 fuzz_one_vertical(char** argv) {
 
   ret_val = 0;
 
-  abandon_entry:
+abandon_entry:
+
+  queue_cur->selection_count++;
 
   splicing_with = -1;
 
