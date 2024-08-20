@@ -1091,7 +1091,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   if (q->depth > max_depth) max_depth = q->depth;
 
   if (use_moo_scheduler) moo_insert_to_queue(q);
-  if (use_explore) vertical_manager_explore_insert(vertical_manager, queue_last);
+  if (use_explore) vertical_manager_explore_insert(vertical_manager, q);
 
   sorted_insert_to_queue(q);
 
