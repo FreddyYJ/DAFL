@@ -66,7 +66,7 @@ struct queue_entry {
 
   struct proximity_score prox_score;  /* Proximity score of the test case */
   u32 entry_id;                       /* The ID assigned to the test case */
-  s32 rank,                           /* Pareto rank of the test case     */
+  s32 rank_moo,                           /* Pareto rank of the test case     */
       rank_explore;                   /* Pareto rank for explore mode */
   u32 selection_count;                /* Number of times selected         */
 
@@ -81,6 +81,7 @@ struct queue_entry {
   struct queue_entry *next_moo;       /* Next element in the MOO queue    */
   struct queue_entry *prev_moo;       /* Prev element in MOO queue */
 
+  struct pareto_info moo_info;        /* Pareto info for MOO mode */
   struct pareto_info explore_info;   /* Pareto info for explore mode */
 
 };
@@ -195,9 +196,10 @@ void vector_push_front(struct vector *vec, struct queue_entry *element) {
 
 struct queue_entry * vector_pop_back(struct vector *vec) {
   if (vec->size == 0) return NULL;
+  struct queue_entry *entry = vec->data[vec->size - 1];
   vec->size--;
   vec->data[vec->size] = NULL;
-  return vec->data[vec->size];
+  return entry;
 }
 
 struct queue_entry *vector_pop(struct vector *vec, u32 index) {
@@ -422,11 +424,7 @@ struct vertical_manager {
   struct vertical_entry *head;
   struct vertical_entry *old;
   struct interval_tree *tree;
-  struct hashmap *count_dfg_path; // path -> count the # of mutation that produces the path
-  struct vector *explore_pareto_frontier;
-  struct vector *explore_dominated;
-  struct vecotr *explore_newly_added;
-  struct vector *explore_recycled;
+
   u64 start_time;
   u8 dynamic_mode;
   u8 use_vertical;
@@ -506,33 +504,6 @@ void vertical_manager_set_mode(struct vertical_manager *manager, u8 use_vertical
   manager->use_vertical = use_vertical;
 }
 
-void vertical_manager_update_dfg_count(struct vertical_manager *manager, u32 dfg_path) {
-  if (!manager) return;
-  struct key_value_pair *kvp = hashmap_get(manager->count_dfg_path, dfg_path);
-  if (kvp) {
-    kvp->value = (void*)((u64)kvp->value + 1);
-  } else {
-    hashmap_insert(manager->count_dfg_path, dfg_path, (void*)1);
-  }
-}
-
-u64 vertical_manager_get_dfg_count(struct vertical_manager *manager, u32 dfg_path) {
-  struct key_value_pair *kvp = hashmap_get(manager->count_dfg_path, dfg_path);
-  if (kvp) {
-    return (u64)kvp->value;
-  }
-  return 0;
-}
-
-void vertical_manager_explore_insert(struct vertical_manager *manager, struct queue_entry *entry) {
-  push_back(manager->explore_newly_added, entry);
-  pareto_info_set(&entry->explore_info, PARETO_NEWLY_ADDED, vector_size(manager->explore_newly_added) - 1);
-}
-
-struct queue_entry *vertical_manager_explore_pareto_frontier(struct vertical_manager *manager);
-
-void vertical_manager_explore_remove(struct vertical_manager *manager, struct queue_entry *entry);
-
 void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry) {
   if (manager->old == NULL) {
     manager->old = entry;
@@ -568,5 +539,55 @@ void vertical_manager_free(struct vertical_manager *manager) {
   ck_free(manager);
 }
 
+
+struct pareto_scheduler {
+  // moo
+  struct vector *moo_pareto_frontier;
+  struct vector *moo_dominated;
+  struct vector *moo_newly_added;
+  struct vector *moo_recycled;
+  // explore
+  struct hashmap *count_dfg_path;
+  struct vector *explore_pareto_frontier;
+  struct vector *explore_dominated;
+  struct vecotr *explore_newly_added;
+  struct vector *explore_recycled;
+};
+
+struct pareto_scheduler *pareto_scheduler_create();
+
+void pareto_scheduler_free(struct pareto_scheduler *scheduler);
+
+struct queue_entry *pareto_scheduler_moo_pop(struct pareto_scheduler *scheduler);
+
+void pareto_scheduler_moo_push(struct pareto_scheduler *scheduler, struct queue_entry *entry);
+
+void pareto_scheduler_moo_remove(struct pareto_scheduler *scheduler, struct queue_entry *entry);
+
+struct queue_entry *pareto_scheduler_explore_pop(struct pareto_scheduler *scheduler);
+
+void pareto_scheduler_explore_push(struct pareto_scheduler *scheduler, struct queue_entry *entry);
+
+void pareto_scheduler_explore_remove(struct pareto_scheduler *scheduler, struct queue_entry *entry);
+
+void pareto_scheduler_update_dfg_count(struct pareto_scheduler *scheduler, u32 dfg_path) {
+  if (!scheduler) return;
+  struct key_value_pair *kvp = hashmap_get(scheduler->count_dfg_path, dfg_path);
+  if (kvp) {
+    kvp->value = (void*)((u64)kvp->value + 1);
+  } else {
+    hashmap_insert(scheduler->count_dfg_path, dfg_path, (void*)1);
+  }
+}
+
+u64 pareto_scheduler_get_dfg_count(struct pareto_scheduler *scheduler, u32 dfg_path) {
+  struct key_value_pair *kvp = hashmap_get(scheduler->count_dfg_path, dfg_path);
+  if (kvp) {
+    return (u64)kvp->value;
+  }
+  return 0;
+}
+
+void pareto_scheduler_push(struct pareto_scheduler *scheduler, struct queue_entry *entry);
 
 #endif //DAFL_AFL_FUZZ_H
