@@ -24,6 +24,32 @@ struct dfg_node_info {
   u32 max_paths;
 };
 
+enum AddQueueMode {
+  ADD_QUEUE_DEFAULT = 0,   // default: found new branch coverage
+  ADD_QUEUE_UNIQUE_VAL = 1,
+  ADD_QUEUE_UNIQUE_VAL_PER_PATH =2,
+  ADD_QUEUE_ALL = 3,  // unique_val_per_path + default
+  ADD_QUEUE_NONE = 4,
+};
+
+enum ParetoStatus {
+  PARETO_UNINITIALIZED = 0,
+  PARETO_FRONTIER = 1,
+  PARETO_DOMINATED = 2,
+  PARETO_NEWLY_ADDED = 3,
+  PARETO_RECYCLED = 4,
+};
+
+struct pareto_info {
+  enum ParetoStatus status;
+  u32 index;
+};
+
+void pareto_info_set(struct pareto_info *info, enum ParetoStatus status, u32 index) {
+  info->status = status;
+  info->index = index;
+}
+
 struct queue_entry {
 
   u8* fname;                          /* File name for the test case      */
@@ -48,7 +74,9 @@ struct queue_entry {
 
   struct proximity_score prox_score;  /* Proximity score of the test case */
   u32 entry_id;                       /* The ID assigned to the test case */
-  s32 rank;                           /* Pareto rank of the test case     */
+  s32 rank_moo,                           /* Pareto rank of the test case     */
+      rank_explore;                   /* Pareto rank for explore mode */
+  u32 selection_count;                /* Number of times selected         */
 
   u64 exec_us,                        /* Execution time (us)              */
   handicap,                       /* Number of queue cycles behind    */
@@ -60,6 +88,9 @@ struct queue_entry {
   struct queue_entry *next;           /* Next element, if any             */
   struct queue_entry *next_moo;       /* Next element in the MOO queue    */
   struct queue_entry *prev_moo;       /* Prev element in MOO queue */
+
+  struct pareto_info moo_info;        /* Pareto info for MOO mode */
+  struct pareto_info explore_info;   /* Pareto info for explore mode */
 
 };
 
@@ -123,6 +154,32 @@ struct vector* vector_create(void) {
   return vec;
 }
 
+struct vector* vector_clone(struct vector *vec) {
+  struct vector *new_vec = vector_create();
+  if (vec->size == 0) return new_vec;
+  new_vec->size = vec->size;
+  new_vec->capacity = vec->size + 1;
+  new_vec->data = ck_alloc(new_vec->capacity * sizeof(struct queue_entry*));
+  memcpy(new_vec->data, vec->data, vec->size * sizeof(struct queue_entry*));
+  return new_vec;
+}
+
+void vector_clear(struct vector *vec) {
+  vec->size = 0;
+  memset(vec->data, 0, vec->capacity * sizeof(struct queue_entry*));
+}
+
+void vector_reduce(struct vector *vec) {
+  size_t new_index = 0;
+  for (u32 i = 0; i < vec->size; i++) {
+    if (vec->data[i] != NULL) {
+      vec->data[new_index] = vec->data[i];
+      new_index++;
+    }
+  }
+  vec->size = new_index;
+}
+
 // Function to add an element to the end of the vector
 void push_back(struct vector* vec, struct queue_entry* element) {
   if (vec->size >= vec->capacity) {
@@ -145,14 +202,27 @@ void vector_push_front(struct vector *vec, struct queue_entry *element) {
   vec->data[0] = element;
 }
 
-struct queue_entry * vector_pop_front(struct vector *vec) {
+struct queue_entry * vector_pop_back(struct vector *vec) {
   if (vec->size == 0) return NULL;
-  struct queue_entry *entry = vec->data[0];
-  for (u32 i = 0; i < vec->size - 1; i++) {
+  struct queue_entry *entry = vec->data[vec->size - 1];
+  vec->size--;
+  vec->data[vec->size] = NULL;
+  return entry;
+}
+
+struct queue_entry *vector_pop(struct vector *vec, u32 index) {
+  if (index >= vec->size) return NULL;
+  if (index == vec->size - 1) return vector_pop_back(vec);
+  struct queue_entry *entry = vec->data[index];
+  for (u32 i = index; i < vec->size - 1; i++) {
     vec->data[i] = vec->data[i + 1];
   }
   vec->size--;
   return entry;
+}
+
+struct queue_entry * vector_pop_front(struct vector *vec) {
+  return vector_pop(vec, 0);
 }
 
 void vector_free(struct vector* vec) {
@@ -343,8 +413,14 @@ void hashmap_free(struct hashmap* map) {
   ck_free(map);
 }
 
+enum VerticalMode {
+  M_HOR = 0,    // Horizontal mode
+  M_VER = 1,    // Vertical mode
+  M_EXP = 2,    // Exploration mode
+};
+
 struct vertical_entry {
-  u32 hash;
+  u32 hash;                   // dfg path hash
   u32 use_count;
   struct vector *entries;
   struct vertical_entry *next;
@@ -356,6 +432,7 @@ struct vertical_manager {
   struct vertical_entry *head;
   struct vertical_entry *old;
   struct interval_tree *tree;
+
   u64 start_time;
   u8 dynamic_mode;
   u8 use_vertical;
@@ -425,11 +502,11 @@ struct vertical_manager *vertical_manager_create();
 
 struct vertical_entry *vertical_manager_select(struct vertical_manager *manager);
 
-u8 vertical_manager_select_mode(struct vertical_manager *manager);
+// Warning: This function has side effect
+enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager);
 
-u8 vertical_manager_get_mode(struct vertical_manager *manager) {
-  return manager->use_vertical;
-}
+// Same as above, but without side effect
+enum VerticalMode vertical_manager_get_mode(struct vertical_manager *manager);
 
 void vertical_manager_set_mode(struct vertical_manager *manager, u8 use_vertical) {
   manager->use_vertical = use_vertical;
@@ -470,5 +547,55 @@ void vertical_manager_free(struct vertical_manager *manager) {
   ck_free(manager);
 }
 
+
+struct pareto_scheduler {
+  // moo
+  struct vector *moo_pareto_frontier;
+  struct vector *moo_dominated;
+  struct vector *moo_newly_added;
+  struct vector *moo_recycled;
+  // explore
+  struct hashmap *count_dfg_path;
+  struct vector *explore_pareto_frontier;
+  struct vector *explore_dominated;
+  struct vecotr *explore_newly_added;
+  struct vector *explore_recycled;
+};
+
+struct pareto_scheduler *pareto_scheduler_create();
+
+void pareto_scheduler_free(struct pareto_scheduler *scheduler);
+
+struct queue_entry *pareto_scheduler_moo_pop(struct pareto_scheduler *scheduler);
+
+void pareto_scheduler_moo_push(struct pareto_scheduler *scheduler, struct queue_entry *entry);
+
+void pareto_scheduler_moo_remove(struct pareto_scheduler *scheduler, struct queue_entry *entry);
+
+struct queue_entry *pareto_scheduler_explore_pop(struct pareto_scheduler *scheduler);
+
+void pareto_scheduler_explore_push(struct pareto_scheduler *scheduler, struct queue_entry *entry);
+
+void pareto_scheduler_explore_remove(struct pareto_scheduler *scheduler, struct queue_entry *entry);
+
+void pareto_scheduler_update_dfg_count(struct pareto_scheduler *scheduler, u32 dfg_path) {
+  if (!scheduler) return;
+  struct key_value_pair *kvp = hashmap_get(scheduler->count_dfg_path, dfg_path);
+  if (kvp) {
+    kvp->value = (void*)((u64)kvp->value + 1);
+  } else {
+    hashmap_insert(scheduler->count_dfg_path, dfg_path, (void*)1);
+  }
+}
+
+u64 pareto_scheduler_get_dfg_count(struct pareto_scheduler *scheduler, u32 dfg_path) {
+  struct key_value_pair *kvp = hashmap_get(scheduler->count_dfg_path, dfg_path);
+  if (kvp) {
+    return (u64)kvp->value;
+  }
+  return 0;
+}
+
+void pareto_scheduler_push(struct pareto_scheduler *scheduler, struct queue_entry *entry);
 
 #endif //DAFL_AFL_FUZZ_H

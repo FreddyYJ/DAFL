@@ -109,7 +109,12 @@ static u8 vertical_is_new_valuation = 0;
 static u8 vertical_use_dynamic = 0;
 static u8 vertical_experiment = 0;
 
+static u64 explore_time = 15 * 60 * 1000; // 15 minutes
+static u64 use_explore = 0;
+static enum AddQueueMode add_queue_mode = 0;
+
 static struct vertical_manager *vertical_manager = NULL;
+static struct pareto_scheduler *pareto_scheduler = NULL;
 // End vertical navigation
 
 EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
@@ -283,20 +288,15 @@ static FILE* unique_dafl_log_file = NULL; /* File to record unique input with ne
       ACTF_NNL(x); \
     if (unique_dafl_log_file) { \
       fprintf(unique_dafl_log_file, x); \
-      fflush(unique_dafl_log_file);     \
     } \
   } while (0)
+
+// fflush(unique_dafl_log_file);     \
 
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
                           *queue_cur, /* Current offset within the queue  */
                           *queue_last;/* Lastly added to the queue        */
 
-static struct queue_entry *pareto_frontier_queue;
-static struct queue_entry *newly_added_queue;
-static struct queue_entry *recycled_queue;
-static struct queue_entry *dominated_queue;
-
-static s32 queue_rank = -1;           /* Rank of the queue entry           */
 static u8 use_moo_scheduler = 1;      /* Scheduling mode                  */
 static u32 moo_cycle = 0;             /* Current moo cycle                */
 static u8 use_dafl_coverage = 0;      /* Use dfg_bits for checking unique path */
@@ -987,11 +987,304 @@ struct vertical_manager *vertical_manager_create() {
   manager->head = NULL;
   manager->old = NULL;
   manager->tree = interval_tree_create();
+
   manager->start_time = get_cur_time();
   manager->dynamic_mode = 0;
   manager->use_vertical = 0;
   return manager;
 }
+
+void update_ranks_moo(struct queue_entry *a, struct queue_entry *b) {
+  struct proximity_score *prox_score_a = &a->prox_score;
+  struct proximity_score *prox_score_b = &b->prox_score;
+  // Compare two entries based on the proximity score domination
+  if (prox_score_a->original > prox_score_b->original && prox_score_a->adjusted > prox_score_b->adjusted) {
+    b->rank_moo++;
+  } else if (prox_score_a->original < prox_score_b->original && prox_score_a->adjusted < prox_score_b->adjusted) {
+    a->rank_moo++;
+  }
+}
+
+void update_ranks_explore(struct queue_entry *a, struct queue_entry *b) {
+  u32 a_path_count = 0;
+  u32 b_path_count = 0;
+  if (a->dfg_cksum != b->dfg_cksum) {
+    a_path_count = pareto_scheduler_get_dfg_count(pareto_scheduler, a->dfg_cksum);
+    b_path_count = pareto_scheduler_get_dfg_count(pareto_scheduler, b->dfg_cksum);
+  }
+  u32 a_sel_count = a->selection_count;
+  u32 b_sel_count = b->selection_count;
+  if (a_sel_count == b_sel_count) {
+    a_sel_count = a->depth;
+    b_sel_count = b->depth;
+  }
+  // path_count, sel_count: the smaller, the better
+  // rank_explore: the smaller, the better
+  if (a_path_count < b_path_count && a_sel_count < b_sel_count) {
+    b->rank_explore++;
+  } else if (a_path_count > b_path_count && a_sel_count > b_sel_count) {
+    a->rank_explore++;
+  }
+}
+
+struct pareto_scheduler *pareto_scheduler_create() {
+  struct pareto_scheduler *scheduler = ck_alloc(sizeof(struct pareto_scheduler));
+  scheduler->moo_pareto_frontier = vector_create();
+  scheduler->moo_dominated = vector_create();
+  scheduler->moo_newly_added = vector_create();
+  scheduler->moo_recycled = vector_create();
+  scheduler->count_dfg_path = hashmap_create(4096);
+  scheduler->explore_pareto_frontier = vector_create();
+  scheduler->explore_dominated = vector_create();
+  scheduler->explore_newly_added = vector_create();
+  scheduler->explore_recycled = vector_create();
+  return scheduler;
+}
+
+void pareto_scheduler_free(struct pareto_scheduler *scheduler) {
+  vector_free(scheduler->moo_pareto_frontier);
+  vector_free(scheduler->moo_dominated);
+  vector_free(scheduler->moo_newly_added);
+  vector_free(scheduler->moo_recycled);
+  hashmap_free(scheduler->count_dfg_path);
+  vector_free(scheduler->explore_pareto_frontier);
+  vector_free(scheduler->explore_dominated);
+  vector_free(scheduler->explore_newly_added);
+  vector_free(scheduler->explore_recycled);
+  ck_free(scheduler);
+}
+
+void pareto_scheduler_push(struct pareto_scheduler *scheduler, struct queue_entry *entry) {
+  if (use_moo_scheduler) {
+    pareto_scheduler_moo_push(scheduler, entry);
+  } 
+  if (use_explore) {
+    pareto_scheduler_explore_push(scheduler, entry);
+  }
+}
+
+struct queue_entry *pareto_scheduler_moo_pop(struct pareto_scheduler *scheduler) {
+  if (vector_size(scheduler->moo_pareto_frontier) == 0) {
+    // If the frontier is empty, select from dominated queue
+    struct vector *new_entries = scheduler->moo_newly_added;
+    struct vector *dominated = scheduler->moo_dominated;
+    u32 new_entries_size = vector_size(new_entries);
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *a = vector_get(new_entries, i);
+      for (u32 j = i + 1; j < new_entries_size; j++) {
+        struct queue_entry *b = vector_get(new_entries, j);
+        update_ranks_moo(a, b);
+      }
+    }
+    u32 dominated_size = vector_size(dominated);
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *a = vector_get(new_entries, i);
+      for (u32 j = 0; j < dominated_size; j++) {
+        struct queue_entry *b = vector_get(dominated, j);
+        update_ranks_moo(a, b);
+      }
+    }
+    // Add new entries to the dominated queue
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *nq = vector_get(new_entries, i);
+      push_back(dominated, nq);
+    }
+    vector_clear(new_entries);
+    dominated_size = vector_size(dominated);
+    // If the dominated queue is empty, select from the recycled queue
+    if (dominated_size == 0) {
+      struct vector *recycled = scheduler->moo_recycled;
+      u32 recycled_size = vector_size(recycled);
+      // reset rank_moo
+      for (u32 i = 0; i < recycled_size; i++) {
+        struct queue_entry *q = vector_get(recycled, i);
+        q->rank_moo = 0;
+      }
+      // Update the ranks
+      for (u32 i = 0; i < recycled_size; i++) {
+        struct queue_entry *a = vector_get(recycled, i);
+        push_back(dominated, a);
+        for (u32 j = i + 1; j < recycled_size; j++) {
+          struct queue_entry *b = vector_get(recycled, j);
+          update_ranks_moo(a, b);
+        }
+      }
+      vector_clear(recycled);
+    }
+    s32 pareto_rank = -1;
+    dominated_size = vector_size(dominated);
+    for (u32 i = 0; i < dominated_size; i++) {
+      struct queue_entry *entry = vector_get(dominated, i);
+      if (pareto_rank < 0) pareto_rank = entry->rank_moo;
+      pareto_rank = MIN(pareto_rank, entry->rank_moo);
+    }
+    struct vector *pareto_frontier = scheduler->moo_pareto_frontier;
+    u32 pareto_index = 0;
+    u32 dominated_index = 0;
+    for (u32 i = 0; i < dominated_size; i++) {
+      struct queue_entry *entry = vector_get(dominated, i);
+      if (entry->rank_moo == pareto_rank) {
+        push_back(pareto_frontier, entry);
+        vector_set(dominated, i, NULL);
+        pareto_info_set(&entry->moo_info, PARETO_FRONTIER, pareto_index++);
+      } else {
+        pareto_info_set(&entry->moo_info, PARETO_DOMINATED, dominated_index++);
+      }
+    }
+    vector_reduce(dominated);
+  }
+  struct queue_entry *selected = vector_pop_back(scheduler->moo_pareto_frontier);
+  if (selected) {
+    push_back(scheduler->moo_recycled, selected);
+    pareto_info_set(&selected->moo_info, PARETO_RECYCLED, vector_size(scheduler->moo_recycled) - 1);
+    LOGF("[sel] [moo] [id %d] [dfg-path %u] [dfg-path-count %llu] [time %llu]\n", 
+      selected->entry_id, selected->dfg_cksum, 
+      pareto_scheduler_get_dfg_count(scheduler, selected->dfg_cksum), get_cur_time() - start_time);
+  }
+  return selected;
+}
+
+void pareto_scheduler_moo_push(struct pareto_scheduler *scheduler, struct queue_entry *entry) {
+  push_back(scheduler->moo_newly_added, entry);
+  pareto_info_set(&entry->moo_info, PARETO_NEWLY_ADDED, vector_size(scheduler->moo_newly_added) - 1);
+}
+
+void pareto_scheduler_moo_remove(struct pareto_scheduler *scheduler, struct queue_entry *entry) {
+  // Remove the entry
+  if (entry == NULL) return;
+  struct vector *vec = NULL;
+  switch (entry->moo_info.status) {
+    case PARETO_FRONTIER:
+      vec = scheduler->moo_pareto_frontier;
+      break;
+    case PARETO_DOMINATED:
+      vec = scheduler->moo_dominated;
+      break;
+    case PARETO_NEWLY_ADDED:
+      vec = scheduler->moo_newly_added;
+      break;
+    default:
+      return;
+  }
+  u32 index = entry->moo_info.index;
+  vector_set(vec, index, NULL);
+  pareto_info_set(&entry->moo_info, PARETO_RECYCLED, index);
+}
+
+struct queue_entry *pareto_scheduler_explore_pop(struct pareto_scheduler *scheduler) {
+  if (vector_size(scheduler->explore_pareto_frontier) == 0) {
+    // If the frontier is empty, select from dominated queue
+    struct vector *new_entries = scheduler->explore_newly_added;
+    struct vector *dominated = scheduler->explore_dominated;
+    u32 new_entries_size = vector_size(new_entries);
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *a = vector_get(new_entries, i);
+      for (u32 j = i + 1; j < new_entries_size; j++) {
+        struct queue_entry *b = vector_get(new_entries, j);
+        update_ranks_explore(a, b);
+      }
+    }
+    u32 dominated_size = vector_size(dominated);
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *a = vector_get(new_entries, i);
+      for (u32 j = 0; j < dominated_size; j++) {
+        struct queue_entry *b = vector_get(dominated, j);
+        update_ranks_explore(a, b);
+      }
+    }
+    // Add new entries to the dominated queue
+    for (u32 i = 0; i < new_entries_size; i++) {
+      struct queue_entry *nq = vector_get(new_entries, i);
+      push_back(dominated, nq);
+    }
+    vector_clear(new_entries);
+    dominated_size = vector_size(dominated);
+    // If the dominated queue is empty, select from the recycled queue
+    if (dominated_size == 0) {
+      struct vector *recycled = scheduler->explore_recycled;
+      u32 recycled_size = vector_size(recycled);
+      // reset rank_explore
+      for (u32 i = 0; i < recycled_size; i++) {
+        struct queue_entry *q = vector_get(recycled, i);
+        q->rank_explore = 0;
+      }
+      // Update the ranks
+      for (u32 i = 0; i < recycled_size; i++) {
+        struct queue_entry *a = vector_get(recycled, i);
+        push_back(dominated, a);
+        for (u32 j = i + 1; j < recycled_size; j++) {
+          struct queue_entry *b = vector_get(recycled, j);
+          update_ranks_explore(a, b);
+        }
+      }
+      vector_clear(recycled);
+    }
+    s32 pareto_rank = -1;
+    dominated_size = vector_size(dominated);
+    for (u32 i = 0; i < dominated_size; i++) {
+      struct queue_entry *entry = vector_get(dominated, i);
+      if (pareto_rank < 0) pareto_rank = entry->rank_explore;
+      pareto_rank = MIN(pareto_rank, entry->rank_explore);
+    }
+    struct vector *pareto_frontier = scheduler->explore_pareto_frontier;
+    u32 pareto_index = 0;
+    u32 dominated_index = 0;
+    for (u32 i = 0; i < dominated_size; i++) {
+      struct queue_entry *entry = vector_get(dominated, i);
+      if (entry->rank_explore == pareto_rank) {
+        push_back(pareto_frontier, entry);
+        vector_set(dominated, i, NULL);
+        pareto_info_set(&entry->explore_info, PARETO_FRONTIER, pareto_index++);
+      } else {
+        pareto_info_set(&entry->explore_info, PARETO_DOMINATED, dominated_index++);
+      }
+    }
+    vector_reduce(dominated);
+  }
+
+  struct queue_entry *selected = vector_pop_back(scheduler->explore_pareto_frontier);
+  if (selected) {
+    push_back(scheduler->explore_recycled, selected);
+    pareto_info_set(&selected->explore_info, PARETO_RECYCLED, vector_size(scheduler->explore_recycled) - 1);
+    LOGF("[sel] [explore] [id %d] [dfg-path %u] [dfg-path-count %llu] [time %llu]\n", 
+      selected->entry_id, selected->dfg_cksum, 
+      pareto_scheduler_get_dfg_count(scheduler, selected->dfg_cksum), get_cur_time() - start_time);
+  }
+  return selected;
+}
+
+void pareto_scheduler_explore_push(struct pareto_scheduler *scheduler, struct queue_entry *entry) {
+  push_back(scheduler->explore_newly_added, entry);
+  pareto_info_set(&entry->explore_info, PARETO_NEWLY_ADDED, vector_size(scheduler->explore_newly_added) - 1);
+}
+
+void pareto_scheduler_explore_remove(struct pareto_scheduler *scheduler, struct queue_entry *entry) {
+  // Remove the entry
+  if (entry == NULL) return;
+  struct vector *vec = NULL;
+  switch (entry->explore_info.status) {
+    case PARETO_FRONTIER:
+      vec = scheduler->explore_pareto_frontier;
+      break;
+    case PARETO_DOMINATED:
+      vec = scheduler->explore_dominated;
+      break;
+    case PARETO_NEWLY_ADDED:
+      vec = scheduler->explore_newly_added;
+      break;
+    default:
+      return;
+  }
+  u32 index = entry->explore_info.index;
+  struct queue_entry *removed = vector_pop(vec, index);
+  if (removed != entry) {
+    LOGF("[error] [explore] [remove] [id %d] [status %d] [index %d] [removed %d] [time %llu]\n", 
+      entry->entry_id, entry->explore_info.status, entry->explore_info.index, removed ? removed->entry_id : -1, get_cur_time() - start_time);
+  }
+  push_back(scheduler->explore_recycled, entry);
+  pareto_info_set(&entry->explore_info, PARETO_RECYCLED, vector_size(scheduler->explore_recycled) - 1);
+}
+
 
 /* Insert a test case to the queue, preserving the sorted order based on the
  * proximity score. Updates global variables 'queue', 'shortcut_per_100', and
@@ -1042,25 +1335,6 @@ static void sorted_insert_to_queue(struct queue_entry* q) {
 
 }
 
-static void moo_insert_to_queue(struct queue_entry *q) {
-  if (!newly_added_queue) {
-    newly_added_queue = q;
-    q->next_moo = NULL;
-    q->prev_moo = NULL;
-    return;
-  }
-  struct queue_entry *q_tail = newly_added_queue;
-  while (q_tail) {
-    if (!q_tail->next_moo) {
-      q_tail->next_moo = q;
-      q->next_moo = NULL;
-      q->prev_moo = q_tail;
-      break;
-    }
-    q_tail = q_tail->next_moo;
-  }
-}
-
 /* Append new test case to the queue. */
 
 static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_score *prox_score) {
@@ -1075,14 +1349,11 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det, struct proximity_sco
   q->prox_score.dfg_dense_map = NULL;
   q->prox_score.dfg_count_map = NULL;
   q->entry_id     = queued_paths;
-  q->rank         = queue_rank + 1;
   q->next = NULL;
-  q->next_moo = NULL;
-  q->prev_moo = NULL;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
-  if (use_moo_scheduler) moo_insert_to_queue(q);
+  pareto_scheduler_push(pareto_scheduler, q);
 
   sorted_insert_to_queue(q);
 
@@ -2044,30 +2315,6 @@ static void cull_queue(void) {
 
 }
 
-static s32 check_domiance(struct proximity_score *a, struct proximity_score *b) {
-  // Compare two entries based on the proximity score domination
-  // Return 1 if a dominates b, -1 if a is dominated by b
-  if (a->original > b->original && a->adjusted > b->adjusted) {
-    return 1;
-  } else if (a->original < b->original && a->adjusted < b->adjusted) {
-    return -1;
-  }
-  return 0;
-}
-
-static void update_ranks(struct queue_entry *a, struct queue_entry *b) {
-  struct proximity_score *prox_score_a = &a->prox_score;
-  struct proximity_score *prox_score_b = &b->prox_score;
-  // Compare two entries based on the proximity score domination
-  s32 dominance = check_domiance(prox_score_a, prox_score_b);
-  // LOGF("[rank] [a %u] [ar %d] [b %u] [br %d] [dom %d]\n", a->entry_id, a->rank, b->entry_id, b->rank, dominance);
-  if (dominance > 0) {
-    b->rank++;
-  } else if (dominance < 0) {
-    a->rank++;
-  }
-}
-
 struct vertical_entry *vertical_manager_select(struct vertical_manager *manager) {
   if (manager->head == NULL && manager->old == NULL) return NULL;
   // Pop from head
@@ -2087,20 +2334,28 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
   return entry;
 }
 
-u8 vertical_manager_select_mode(struct vertical_manager *manager)  {
-  if (manager->head == NULL && manager->old == NULL) return 0;
+enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager)  {
+  enum VerticalMode initial_mode = use_explore ? M_EXP : M_HOR;
   if (!manager->dynamic_mode) {
-    if (get_cur_time() - manager->start_time > 15 * 60 * 1000) {
+    if (get_cur_time() - manager->start_time > explore_time) {
       manager->dynamic_mode = 1;
     } else {
-      return 0;
+      return initial_mode;
     }
   }
+  if (manager->head == NULL && manager->old == NULL) return M_HOR;
   // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
   vertical_manager_set_mode(manager, !manager->use_vertical);
-  return manager->use_vertical;
+  return vertical_manager_get_mode(manager);
 }
 
+enum VerticalMode vertical_manager_get_mode(struct vertical_manager *manager) {
+  enum VerticalMode initial_mode = use_explore ? M_EXP : M_HOR;
+  if (add_queue_mode == 4) return M_EXP;
+  if (manager->head == NULL && manager->old == NULL) return initial_mode;
+  if (!manager->dynamic_mode) return initial_mode;
+  return manager->use_vertical ? M_VER : M_HOR;
+}
 
 static struct queue_entry* select_next_entry_dafl() {
   struct queue_entry* q = NULL;
@@ -2118,42 +2373,6 @@ static struct queue_entry* select_next_entry_dafl() {
   return q;
 }
 
-static void move_entry_to_recycled(struct queue_entry *prev_entry) {
-  // Remove this entry from moo queue
-  if (!prev_entry) return;
-  struct queue_entry *q = recycled_queue;
-  while (q) {
-    if (q == prev_entry) {
-      return;
-    }
-    q = q->next_moo;
-  }
-
-  // If it was head of list
-  if (!prev_entry->prev_moo) {
-    if (prev_entry == pareto_frontier_queue) {
-      pareto_frontier_queue = pareto_frontier_queue->next_moo;
-      pareto_frontier_queue->prev_moo = NULL;
-    } else if (prev_entry == newly_added_queue) {
-      newly_added_queue = newly_added_queue->next_moo;
-      newly_added_queue->prev_moo = NULL;
-    } else if (prev_entry == dominated_queue) {
-      dominated_queue = dominated_queue->next_moo;
-      dominated_queue->prev_moo = NULL;
-    }
-  } else {
-    q = prev_entry->prev_moo;
-    q->next_moo = prev_entry->next_moo;
-    if (q->next_moo)
-      q->next_moo->prev_moo = q;
-  }
-  if (recycled_queue) recycled_queue->prev_moo = prev_entry;
-  prev_entry->prev_moo = NULL;
-  prev_entry->next_moo = recycled_queue;
-  recycled_queue = prev_entry;
-}
-
-
 static struct queue_entry* select_next_entry_vertical() {
   struct vertical_entry *entry = vertical_manager_select(vertical_manager);
   struct queue_entry* q = NULL;
@@ -2164,112 +2383,43 @@ static struct queue_entry* select_next_entry_vertical() {
     // push back to the old queue
     vertical_manager_insert_to_old(vertical_manager, entry);
   }
-  if (!q) {
-    move_entry_to_recycled(q);
-  }
   LOGF("[sel] [vertical] [id %d] [dfg-path %u] [time %llu]\n", q ? q->entry_id : -1, entry->hash, get_cur_time() - start_time);
   return q;
 }
 
 static struct queue_entry* select_next_entry_moo() {
   // Use the MOO scheduler
-  struct queue_entry *q = NULL;
-  if (!pareto_frontier_queue) {
-    // If the pareto frontier queue is empty, select from the dominated queue
-    // First, update the adjusted score
-    LOGF("[sche] [moo] [cycle %u]\n", moo_cycle);
-    if (proximity_score_allowance >= 0) {
-      update_dfg_score_moo();
-    }
-    // First, update the dominated queue with the new entries
-    moo_cycle++;
-    struct vector *new_entries = list_to_vector(newly_added_queue);
-    u32 new_entries_size = vector_size(new_entries);
-    newly_added_queue = NULL;
-    struct vector *dominated_vec = list_to_vector(dominated_queue);
-    u32 dominated_size = vector_size(dominated_vec);
-    LOGF("[sche] [moo-size] [new %u] [dom %u]\n", new_entries_size, dominated_size);
-    // Update the ranks
-    for (u32 i = 0; i < new_entries_size; i++) {
-      struct queue_entry *a = vector_get(new_entries, i);
-      for (u32 j = i + 1; j < new_entries_size; j++) {
-        struct queue_entry *b = vector_get(new_entries, j);
-        update_ranks(a, b);
-      }
-    }
-    for (u32 i = 0; i < new_entries_size; i++) {
-      struct queue_entry *a = vector_get(new_entries, i);
-      for (u32 j = i + 1; j < dominated_size; j++) {
-        struct queue_entry *b = vector_get(dominated_vec, j);
-        update_ranks(a, b);
-      }
-    }
-    // Add new entries to the dominated queue
-    for (u32 i = 0; i < new_entries_size; i++) {
-      struct queue_entry *nq = vector_get(new_entries, i);
-      push_back(dominated_vec, nq);
-    }
-    dominated_size = vector_size(dominated_vec);
-    vector_free(new_entries);
-    // If the dominated queue is empty, select from the recycled queue
-    if (dominated_size == 0) {
-      vertical_manager_set_mode(vertical_manager, 1);
-      vector_free(dominated_vec);
-      struct vector *recycled_vec = list_to_vector(recycled_queue);
-      LOGF("[sche] [moo] [recycled %u]\n", vector_size(recycled_vec));
-      for (u32 i = 0; i < vector_size(recycled_vec); i++) {
-        struct queue_entry *entry = vector_get(recycled_vec, i);
-        entry->rank = 0;
-      }
-      recycled_queue = NULL;
-      for (u32 i = 0; i < vector_size(recycled_vec); i++) {
-        struct queue_entry *a = vector_get(recycled_vec, i);
-        for (u32 j = i + 1; j < vector_size(recycled_vec); j++) {
-          struct queue_entry *b = vector_get(recycled_vec, j);
-          update_ranks(a, b);
-        }
-      }
-      dominated_queue = vector_to_list(recycled_vec);
-      dominated_vec = recycled_vec;
-    }
-    // Construct the pareto frontier queue from the dominated queue
-    queue_rank = -1;
-    for (u32 i = 0; i < vector_size(dominated_vec); i++) {
-      struct queue_entry *entry = vector_get(dominated_vec, i);
-      if (queue_rank < 0) queue_rank = entry->rank;
-      queue_rank = MIN(queue_rank, entry->rank);
-    }
-    struct vector *pareto_frontier_vec = vector_create();
-    for (u32 i = 0; i < vector_size(dominated_vec); i++) {
-      struct queue_entry *entry = vector_get(dominated_vec, i);
-      // LOGF("[sche] [pareto] [id %u] [rank %d] [min %u]\n", entry->entry_id, entry->rank, queue_rank);
-      if (entry->rank == queue_rank) {
-        vector_set(dominated_vec, i, NULL);
-        push_back(pareto_frontier_vec, entry);
-      }
-    }
-    LOGF("[sche] [frontier] [size %u]\n", vector_size(pareto_frontier_vec));
-    dominated_queue = vector_to_list(dominated_vec);
-    vector_free(dominated_vec);
-    pareto_frontier_queue = vector_to_list(pareto_frontier_vec);
-    vector_free(pareto_frontier_vec);
-  }
-  // Pop from pareto_frontier_queue, push to recycled_queue
-  q = pareto_frontier_queue;
-  pareto_frontier_queue = q->next_moo;
-  if (pareto_frontier_queue)
-    pareto_frontier_queue->prev_moo = NULL;
-  if (recycled_queue)
-    recycled_queue->prev_moo = q;
-  q->next_moo = recycled_queue;
-  q->prev_moo = NULL;
-  recycled_queue = q;
-  LOGF("[sel] [moo] [id %d] [prev %d] [rank %d] [dfg-path %u] [time %llu]\n",
-       q->entry_id, queue_cur ? queue_cur->entry_id : -1, queue_rank, q->dfg_cksum, get_cur_time() - start_time);
+  struct queue_entry *q = pareto_scheduler_moo_pop(pareto_scheduler);
   return q;
 }
 
+static struct queue_entry* select_next_entry_explore() {
+  // Pareto frontier for exploration
+  // Minimize q->selection_count, vertical_manager_get_dfg_path_count(manager, q->dfg_cksum)
+  return pareto_scheduler_explore_pop(pareto_scheduler);
+}
+
+static void handle_selected_entry(enum VerticalMode mode, struct queue_entry *entry) {
+  if (entry == NULL) return;
+
+  if (mode != M_EXP && use_explore) {
+    // Handle explore
+    pareto_scheduler_explore_remove(pareto_scheduler, entry);
+  }
+  
+  if (mode != M_VER) {
+    // Handle vertical
+  }
+
+  if (mode != M_HOR) {
+    // Handle horizontal
+    pareto_scheduler_moo_remove(pareto_scheduler, entry);
+  }
+}
+
 static struct queue_entry* select_next_entry() {
+
+  struct queue_entry *selected_entry = NULL;
 
   // Use the default dafl scheduler
   if (!use_moo_scheduler) {
@@ -2278,14 +2428,26 @@ static struct queue_entry* select_next_entry() {
 
   // Determine whether to use the vertical navigation
   if (vertical_use_dynamic) {
-    u8 use_vertical = vertical_manager_select_mode(vertical_manager);
-    if (use_vertical) {
-      struct queue_entry *q = select_next_entry_vertical();
-      if (q) return q;
+    enum VerticalMode mode = vertical_manager_select_mode(vertical_manager);
+    switch (mode) {
+    case M_EXP:
+      selected_entry = select_next_entry_explore();
+      break;
+    case M_VER:
+      selected_entry = select_next_entry_vertical();
+      break;
+    case M_HOR:
+      selected_entry = select_next_entry_moo();
+      break;
+    default:
+      break;
     }
+    handle_selected_entry(mode, selected_entry);
   }
 
-  // Else: use moo
+  if (selected_entry)
+    return selected_entry;
+  // Fallback
   return select_next_entry_moo();
 
 }
@@ -3654,7 +3816,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   }
 }
 
-static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cksum, struct queue_entry* q) {
+static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cksum, struct queue_entry* q, u32 *val_hash) {
   u8 *valexe = "";
   u8 *covdir = "";
   u8 *tmpfile = "";
@@ -3663,11 +3825,13 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   u8 *tmp_argv1 = "";
   u32 num = 1 + UR(ARITH_MAX);
 
+  *val_hash = 0;
+
   if(!getenv("PACFIX_VAL_EXE")) return 0;
   if(!getenv("PACFIX_COV_DIR")) return 0;
   valexe = getenv("PACFIX_VAL_EXE");
   covdir = getenv("PACFIX_COV_DIR");
-  tmpfile = alloc_printf((crashed == 1 ? "%s/__valuation_file_%llu" : "%s/__valuation_file_noncrash_%llu"), covdir, (crashed == 1 ? total_saved_crashes : total_saved_positives));
+  tmpfile = alloc_printf((crashed ? "%s/__valuation_file_%llu" : "%s/__valuation_file_noncrash_%llu"), covdir, (crashed ? total_saved_crashes : total_saved_positives));
   tmpfile_env = alloc_printf("PACFIX_FILENAME=%s", tmpfile);
 
   // Remove covdir + "/__tmp_file" (It might not exist, but that's okay)
@@ -3687,6 +3851,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   }
 
   u32 hash = hash_file(tmpfile);
+  *val_hash = hash;
   struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
   if (q) {
     LOGF("[vertical] [entry] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [crash %u] [time %llu] [last-loc %d]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(unique_mem_hashmap), crashed, get_cur_time() - start_time, q ? q->last_location : -1);
@@ -3736,14 +3901,14 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
     ck_free(tmpfile);
     return 0;
   }
-  u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed == 1 ? "neg" : "pos",
-                                 crashed == 1 ? total_saved_crashes : total_saved_positives);
+  u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed ? "neg" : "pos",
+                                 crashed ? total_saved_crashes : total_saved_positives);
   hashmap_insert(unique_mem_hashmap, hash, NULL);
   LOGF("[pacfix] [mem] [%s] [seed %d] [entry %d] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1,
-       crashed == 1 ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
+       crashed ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
 
   vertical_is_new_valuation = 1;
-  if (crashed == 1) {
+  if (crashed) {
     total_saved_crashes++;
   } else {
     total_saved_positives++;
@@ -4031,7 +4196,8 @@ static void perform_dry_run(char** argv, char *base_crash_seed) {
           if (dfg_node_info_map) {
             check_unique_path();
           }
-          get_valuation(0, argv, use_mem, q->len, checksum, q);
+          u32 val_hash;
+          get_valuation(0, argv, use_mem, q->len, checksum, q, &val_hash);
         }
 
         break;
@@ -4093,7 +4259,8 @@ static void perform_dry_run(char** argv, char *base_crash_seed) {
           if (dfg_node_info_map) {
             check_unique_path();
           }
-          get_valuation(1, argv, use_mem, q->len, checksum, q);
+          u32 val_hash;
+          get_valuation(1, argv, use_mem, q->len, checksum, q, &val_hash);
         }
 
         if (crash_mode) break;
@@ -4439,22 +4606,32 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   u8  *fn = "";
   u8  hnb;
+  u8  is_interesting = 0;
   s32 fd;
   u8  keeping = 0, res;
   u8 has_valid_unique_path = 0;
   u8 save_to_file = 0;
+  u8 has_unique_val_per_path = 0;
+  u32 val_hash;
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
   u32 dfg_checksum = get_dfg_checksum();
+  pareto_scheduler_update_dfg_count(pareto_scheduler, dfg_checksum);
+  // LOGF("[sii] [seed %d] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
+  //      queue_cur ? queue_cur->entry_id : -1, dfg_checksum, check_covered_target(), prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
   if (dfg_node_info_map) {
+    if (check_covered_target()) {
+      if (fault == FAULT_CRASH || fault == FAULT_NONE) {
+        save_to_file = get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum, NULL, &val_hash);
+      }
+    }
     has_valid_unique_path = check_unique_path();
     if (has_valid_unique_path) {
       LOGF("[moo] [uniq-path] [seed %d] [moo-id %u]\n", queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap));
     }
   }
-  if (vertical_experiment) {
-    if (check_coverage(fault == FAULT_CRASH, argv, mem, len)) {
-      get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum, NULL);
+  if (vertical_experiment && (fault == FAULT_CRASH || fault == FAULT_NONE)) {
+    if (save_to_file) {
       return 1;
     }
     return 0;
@@ -4463,7 +4640,14 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   if ((fault == FAULT_CRASH) || (fault == FAULT_NONE)) {
 
     hnb = has_new_bits(virgin_bits);
-    if (hnb) {
+    switch (add_queue_mode) {
+    case ADD_QUEUE_DEFAULT:  is_interesting = hnb; break;
+    case ADD_QUEUE_UNIQUE_VAL_PER_PATH: is_interesting = vertical_is_new_valuation; break;
+    case ADD_QUEUE_UNIQUE_VAL:  is_interesting = save_to_file; break;
+    case ADD_QUEUE_ALL:  is_interesting = (hnb || vertical_is_new_valuation); break;
+    case ADD_QUEUE_NONE:  is_interesting = 0; break;
+    }
+    if (is_interesting) {
 
     /* Keep only if there are new bits in the map, add to queue for
        future fuzzing, etc. */
@@ -4504,8 +4688,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
       queue_last->dfg_cksum = get_dfg_checksum();
       queue_last->last_location = *last_location;
-      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u]\n",
-           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location);
+      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u] [val-hash %u] [stf %d]\n",
+           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location, val_hash, save_to_file);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
@@ -4595,7 +4779,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 keep_as_crash:
 
       if (!check_coverage(1, argv, mem, len)) return keeping;
-      save_to_file = get_valuation(1, argv, mem, len, dfg_checksum, new_seed);
+      // save_to_file = get_valuation(1, argv, mem, len, dfg_checksum, new_seed, &val_hash);
 
       /* This is handled in a manner roughly similar to timeouts,
          except for slightly different limits and no need to re-run test
@@ -4645,7 +4829,7 @@ keep_as_crash:
       break;
     case FAULT_NONE:
       if (!check_coverage(0, argv, mem, len)) return keeping;
-      save_to_file = get_valuation(0, argv, mem, len, dfg_checksum, new_seed);
+      // save_to_file = get_valuation(0, argv, mem, len, dfg_checksum, new_seed, &val_hash);
 
       total_normals++;
 
@@ -6112,6 +6296,9 @@ static double calculate_factor(double prox_score) {
   else if (no_dfg_schedule || !total_prox_cnt) factor = 1.0; // No factor.
   else factor = (prox_score) / ((double) total_prox_original / (double) total_prox_cnt); // Default.
 
+  if (factor < 1 / 16) factor = 1 / 16;
+  if (factor > 16) factor = 16.0;
+
   return factor;
 
 }
@@ -6396,7 +6583,7 @@ u32 convert_to_actual_location(u32 max, u32 sel) {
 u32 select_location_vertical(u32 max, double *rel) {
   u32 result = 0;
   if (max) {
-    if (use_vertical_navigation || vertical_manager_get_mode(vertical_manager))
+    if (use_vertical_navigation || vertical_manager_get_mode(vertical_manager) == M_VER)
       result = convert_to_actual_location(max, interval_tree_select(vertical_manager->tree));
     else
       result = UR(max);
@@ -6921,7 +7108,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_FLIP32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP32] += stage_max;
 
-  skip_bitflip:
+skip_bitflip:
 
   if (no_arith) goto skip_arith;
 
@@ -7179,7 +7366,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_ARITH32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH32] += stage_max;
 
-  skip_arith:
+skip_arith:
 
   /**********************
    * INTERESTING VALUES *
@@ -7373,7 +7560,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_INTEREST32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST32] += stage_max;
 
-  skip_interest:
+skip_interest:
 
   /********************
    * DICTIONARY STUFF *
@@ -7488,7 +7675,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_EXTRAS_UI]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_UI] += stage_max;
 
-  skip_user_extras:
+skip_user_extras:
 
   if (!a_extras_cnt) goto skip_extras;
 
@@ -7539,7 +7726,7 @@ static u8 fuzz_one_vertical(char** argv) {
   stage_finds[STAGE_EXTRAS_AO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_AO] += stage_max;
 
-  skip_extras:
+skip_extras:
 
   /* If we made this to here without jumping to havoc_stage or abandon_entry,
      we're properly done with deterministic steps and can mark it as such
@@ -7551,7 +7738,7 @@ static u8 fuzz_one_vertical(char** argv) {
    * RANDOM HAVOC *
    ****************/
 
-  havoc_stage:
+havoc_stage:
 
   stage_cur_byte = -1;
 
@@ -7577,7 +7764,7 @@ static u8 fuzz_one_vertical(char** argv) {
     perf_score = orig_perf;
 
     /* Adjust perf_score with the factor derived from the proximity score */
-    double prox_score = (queue_cur->prox_score.adjusted + target->prox_score.adjusted) / 2;
+    double prox_score = (queue_cur->prox_score.original + target->prox_score.original) / 2;
     perf_score = (u32) (calculate_factor(prox_score) * (double) perf_score);
 
     sprintf(tmp, "splice-vertical-%u", splice_cycle);
@@ -7586,6 +7773,8 @@ static u8 fuzz_one_vertical(char** argv) {
     stage_max   = SPLICE_HAVOC * perf_score / havoc_div / 100;
 
   }
+
+  LOGF("[pow] [orig %u] [factor %f] [perf %u] [id %d]\n", orig_perf, calculate_factor(queue_cur->prox_score.original), perf_score, queue_cur->entry_id);
 
   if (stage_max < HAVOC_MIN) stage_max = HAVOC_MIN;
 
@@ -8091,7 +8280,7 @@ static u8 fuzz_one_vertical(char** argv) {
      splices them together at some offset, then relies on the havoc
      code to mutate that blob. */
 
-  retry_splicing:
+retry_splicing:
 
   if (use_splicing && splice_cycle++ < SPLICE_CYCLES &&
       queued_paths > 1 && queue_cur->len > 1) {
@@ -8179,7 +8368,9 @@ static u8 fuzz_one_vertical(char** argv) {
 
   ret_val = 0;
 
-  abandon_entry:
+abandon_entry:
+
+  queue_cur->selection_count++;
 
   splicing_with = -1;
 
@@ -11070,7 +11261,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:")) > 0)
 
     switch (opt) {
 
@@ -11312,6 +11503,36 @@ int main(int argc, char** argv) {
     case 'b':
       base_crash_seed = optarg;
       break;
+    
+    case 'a':
+      explore_time = atoi(optarg) * 60 * 1000;
+      break;
+    
+    case 'g':
+      use_explore = 1;
+      break;
+
+    case 'q':
+      switch (optarg[0]) {
+        case 'd':
+          add_queue_mode = ADD_QUEUE_DEFAULT;
+          break;
+        case 'v':
+          add_queue_mode = ADD_QUEUE_UNIQUE_VAL_PER_PATH;
+          break;
+        case 'a':
+          add_queue_mode = ADD_QUEUE_ALL;
+          break;
+        case 'u':
+          add_queue_mode = ADD_QUEUE_UNIQUE_VAL;
+          break;
+        case 'n':
+          add_queue_mode = ADD_QUEUE_NONE;
+          break;
+        default:
+          FATAL("Unsupported suffix or bad syntax for -q");
+      }
+      break;
 
     default:
 
@@ -11324,6 +11545,7 @@ int main(int argc, char** argv) {
   setup_signal_handlers();
   check_asan_opts();
   init_vertical_navigation();
+  pareto_scheduler = pareto_scheduler_create();
 
   if (sync_id) fix_up_sync();
 
@@ -11522,6 +11744,7 @@ stop_fuzzing:
   hashmap_free(dfg_hashmap);
   hashmap_free(unique_mem_hashmap);
   vertical_manager_free(vertical_manager);
+  pareto_scheduler_free(pareto_scheduler);
   ck_free(target_path);
   ck_free(sync_id);
   ck_free(dfg_count_map);
