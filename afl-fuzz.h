@@ -24,6 +24,14 @@ struct dfg_node_info {
   u32 max_paths;
 };
 
+enum AddQueueMode {
+  ADD_QUEUE_DEFAULT = 0,   // default: found new branch coverage
+  ADD_QUEUE_UNIQUE_VAL = 1,
+  ADD_QUEUE_UNIQUE_VAL_PER_PATH =2,
+  ADD_QUEUE_ALL = 3,  // unique_val_per_path + default
+  ADD_QUEUE_NONE = 4,
+};
+
 enum ParetoStatus {
   PARETO_UNINITIALIZED = 0,
   PARETO_FRONTIER = 1,

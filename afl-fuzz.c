@@ -111,7 +111,7 @@ static u8 vertical_experiment = 0;
 
 static u64 explore_time = 15 * 60 * 1000; // 15 minutes
 static u64 use_explore = 1;
-static u8 add_queue_mode = 0;
+static enum AddQueueMode add_queue_mode = 0;
 
 static struct vertical_manager *vertical_manager = NULL;
 static struct pareto_scheduler *pareto_scheduler = NULL;
@@ -4611,13 +4611,14 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8  keeping = 0, res;
   u8 has_valid_unique_path = 0;
   u8 save_to_file = 0;
+  u8 has_unique_val_per_path = 0;
   u32 val_hash;
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
   u32 dfg_checksum = get_dfg_checksum();
   pareto_scheduler_update_dfg_count(pareto_scheduler, dfg_checksum);
-  LOGF("[sii] [seed %d] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
-       queue_cur ? queue_cur->entry_id : -1, dfg_checksum, check_covered_target(), prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
+  // LOGF("[sii] [seed %d] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
+  //      queue_cur ? queue_cur->entry_id : -1, dfg_checksum, check_covered_target(), prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
   if (dfg_node_info_map) {
     if (check_covered_target()) {
       if (fault == FAULT_CRASH || fault == FAULT_NONE) {
@@ -4640,10 +4641,11 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
     hnb = has_new_bits(virgin_bits);
     switch (add_queue_mode) {
-    case 0:  is_interesting = hnb; break;
-    case 1:  is_interesting = save_to_file; break;
-    case 2:  is_interesting = (hnb || save_to_file); break;
-    case 3:  is_interesting = 0; break;
+    case ADD_QUEUE_DEFAULT:  is_interesting = hnb; break;
+    case ADD_QUEUE_UNIQUE_VAL_PER_PATH: is_interesting = vertical_is_new_valuation; break;
+    case ADD_QUEUE_UNIQUE_VAL:  is_interesting = save_to_file; break;
+    case ADD_QUEUE_ALL:  is_interesting = (hnb || vertical_is_new_valuation); break;
+    case ADD_QUEUE_NONE:  is_interesting = 0; break;
     }
     if (is_interesting) {
 
@@ -11511,12 +11513,24 @@ int main(int argc, char** argv) {
       break;
 
     case 'q':
-      if (optarg[0] == 'v') {
-        add_queue_mode = 1;
-      } else if (optarg[0] == 'a') {
-        add_queue_mode = 2;
-      } else if (optarg[0] == 'n') {
-        add_queue_mode = 3;
+      switch (optarg[0]) {
+        case 'd':
+          add_queue_mode = ADD_QUEUE_DEFAULT;
+          break;
+        case 'v':
+          add_queue_mode = ADD_QUEUE_UNIQUE_VAL_PER_PATH;
+          break;
+        case 'a':
+          add_queue_mode = ADD_QUEUE_ALL;
+          break;
+        case 'u':
+          add_queue_mode = ADD_QUEUE_UNIQUE_VAL;
+          break;
+        case 'n':
+          add_queue_mode = ADD_QUEUE_NONE;
+          break;
+        default:
+          FATAL("Unsupported suffix or bad syntax for -q");
       }
       break;
 
