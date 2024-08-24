@@ -110,7 +110,7 @@ static u8 vertical_use_dynamic = 0;
 static u8 vertical_experiment = 0;
 
 static u64 explore_time = 15 * 60 * 1000; // 15 minutes
-static u64 use_explore = 1;
+static u64 use_explore = 0;
 static enum AddQueueMode add_queue_mode = 0;
 
 static struct vertical_manager *vertical_manager = NULL;
@@ -11509,7 +11509,7 @@ int main(int argc, char** argv) {
       break;
     
     case 'g':
-      use_explore = 0;
+      use_explore = 1;
       break;
 
     case 'q':
