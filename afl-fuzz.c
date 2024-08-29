@@ -282,6 +282,7 @@ static s32 proximity_score_allowance = -1;  /* Node will be treated as new cover
 static u32 max_queue_size = 4096;          /* Maximum input in queue            */
 static u32 unique_dafl_input = 0;     /* Number of unique input with new coverage on def-use graph */
 static FILE* unique_dafl_log_file = NULL; /* File to record unique input with new coverage on def-use graph */
+static u8 ignore_crash_loc = 0;         /* Ignore crash location in unique input */
 
 #define LOGF(x...) do { \
     if (not_on_tty) \
@@ -3738,6 +3739,7 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 coverage_result = check_covered_target();
   if (!crashed) return coverage_result;
   if (crashed && !coverage_result) return 0;
+  if (ignore_crash_loc) return coverage_result;
 
   for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
     if (dfg_targets[i] > MAP_SIZE) return 0;
@@ -11261,7 +11263,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:U")) > 0)
 
     switch (opt) {
 
@@ -11532,6 +11534,10 @@ int main(int argc, char** argv) {
         default:
           FATAL("Unsupported suffix or bad syntax for -q");
       }
+      break;
+    
+    case 'U':
+      ignore_crash_loc = 1;
       break;
 
     default:
