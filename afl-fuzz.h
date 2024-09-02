@@ -9,6 +9,7 @@
 
 // For interval tree: should be power of 2
 #define INTERVAL_SIZE 1024
+#define MAX_SCHEDULER_NUM 16
 
 struct proximity_score {
   u64 original;
@@ -25,10 +26,10 @@ struct dfg_node_info {
 };
 
 enum AddQueueMode {
-  ADD_QUEUE_DEFAULT = 0,   // default: found new branch coverage
+  ADD_QUEUE_DEFAULT = 0, // default: found new branch coverage
   ADD_QUEUE_UNIQUE_VAL = 1,
-  ADD_QUEUE_UNIQUE_VAL_PER_PATH =2,
-  ADD_QUEUE_ALL = 3,  // unique_val_per_path + default
+  ADD_QUEUE_UNIQUE_VAL_PER_PATH = 2,
+  ADD_QUEUE_ALL = 3, // unique_val_per_path + default
   ADD_QUEUE_NONE = 4,
 };
 
@@ -418,6 +419,18 @@ enum VerticalMode {
   M_VER = 1,    // Vertical mode
   M_EXP = 2,    // Exploration mode
 };
+
+struct stride_scheduler {
+  u32 stride_values[MAX_SCHEDULER_NUM];
+  u32 stride_count[MAX_SCHEDULER_NUM];
+  u32 stride_size;
+  u64 last_update;
+  enum VerticalMode current;
+};
+
+struct stride_scheduler *stride_scheduler_create();
+enum VerticalMode stride_scheduler_get_stride(struct stride_scheduler *stride);
+void stride_scheduler_update(struct stride_scheduler *stride, enum VerticalMode selected);
 
 struct vertical_entry {
   u32 hash;                   // dfg path hash

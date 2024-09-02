@@ -283,6 +283,9 @@ static u32 max_queue_size = 4096;          /* Maximum input in queue            
 static u32 unique_dafl_input = 0;     /* Number of unique input with new coverage on def-use graph */
 static FILE* unique_dafl_log_file = NULL; /* File to record unique input with new coverage on def-use graph */
 static u8 ignore_crash_loc = 0;         /* Ignore crash location in unique input */
+static u8 scheduler_select_mode = 0;    /* Scheduler selection mode */
+static double scheduler_select_ratio = 0.5; /* Ratio for vertical scheduler selection */
+static struct stride_scheduler *stride_scheduler = NULL; /* Stride scheduler */
 
 #define LOGF(x...) do { \
     if (not_on_tty) \
@@ -842,6 +845,47 @@ static s32 compare_proximity_score(struct proximity_score *a, struct proximity_s
   if (a->adjusted < b->adjusted) return -1;
   if (a->adjusted > b->adjusted) return 1;
   return 0;
+}
+
+struct stride_scheduler *stride_scheduler_create() {
+  struct stride_scheduler *stride = ck_alloc(sizeof(struct stride_scheduler));
+  // If ratio is 0 or 1, select one scheduler
+  if (scheduler_select_ratio < 0.001 || scheduler_select_ratio > 0.999) {
+    stride->stride_size = 1;
+    if (scheduler_select_ratio < 0.001) {
+      stride->current = M_HOR;
+      stride->stride_values[M_HOR] = 1024;
+      stride->stride_values[M_VER] = 0;
+    } else {
+      stride->current = M_VER;
+      stride->stride_values[M_HOR] = 0;
+      stride->stride_values[M_VER] = 1024;
+    }
+    return stride;
+  }
+  // Calculate strides for each schedulers
+  stride->stride_size = 2;
+  u32 moo_stride = (u32)1024 * scheduler_select_ratio;
+  u32 vertical_stride = 1024 - moo_stride;
+  stride->stride_values[M_HOR] = moo_stride;
+  stride->stride_values[M_VER] = vertical_stride;
+  stride->current = M_HOR;
+  return stride;
+}
+
+enum VerticalMode stride_scheduler_get_stride(struct stride_scheduler *stride) {
+  if (stride->stride_size == 2) {
+    if (stride->stride_count[M_HOR] <= stride->stride_values[M_HOR]) {
+      stride->current = M_HOR;
+    } else {
+      stride->current = M_VER;
+    }
+  }
+  return stride->current;
+}
+
+void stride_scheduler_update(struct stride_scheduler *stride, enum VerticalMode selected) {
+  stride->stride_count[selected] += stride->stride_values[selected];
 }
 
 // Implementation of interval tree
@@ -2346,7 +2390,13 @@ enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager)
   }
   if (manager->head == NULL && manager->old == NULL) return M_HOR;
   // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
-  vertical_manager_set_mode(manager, !manager->use_vertical);
+  u8 use_vertical = !manager->use_vertical;
+  if (scheduler_select_mode) {
+    // Use adaptive mode
+  } else {
+    use_vertical = stride_scheduler_get_stride(stride_scheduler) == M_VER;
+  }
+  vertical_manager_set_mode(manager, use_vertical);
   return vertical_manager_get_mode(manager);
 }
 
@@ -11233,6 +11283,7 @@ void init_vertical_navigation() { // initialize vertical navigation
   memset(moo_operator_val, 0, sizeof(moo_operator_val));
   memset(moo_operator_total, 0, sizeof(moo_operator_total));
   vertical_manager = vertical_manager_create();
+  stride_scheduler = stride_scheduler_create();
 
 }
 
@@ -11263,7 +11314,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:U")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:UX:")) > 0)
 
     switch (opt) {
 
@@ -11539,6 +11590,21 @@ int main(int argc, char** argv) {
     case 'U':
       ignore_crash_loc = 1;
       break;
+    
+    case 'X': {
+      char *option = NULL;
+      char *value_str = NULL;
+      scheduler_select_ratio = 0.5;
+      option = strtok(optarg, ":");
+      value_str = strtok(NULL, ":");
+      if (option[0] == 'a') {
+        scheduler_select_mode = 1;
+      }
+      if (value_str) {
+        scheduler_select_ratio = atof(value_str);
+      }
+      break;
+    }
 
     default:
 
