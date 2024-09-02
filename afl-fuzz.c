@@ -873,7 +873,8 @@ struct stride_scheduler *stride_scheduler_create() {
   return stride;
 }
 
-enum VerticalMode stride_scheduler_get_stride(struct stride_scheduler *stride) {
+enum VerticalMode stride_scheduler_get_mode(struct stride_scheduler *stride) {
+  stride->previous = stride->current;
   if (stride->stride_size == 2) {
     if (stride->stride_count[M_HOR] <= stride->stride_values[M_HOR]) {
       stride->current = M_HOR;
@@ -886,6 +887,75 @@ enum VerticalMode stride_scheduler_get_stride(struct stride_scheduler *stride) {
 
 void stride_scheduler_update(struct stride_scheduler *stride, enum VerticalMode selected) {
   stride->stride_count[selected] += stride->stride_values[selected];
+  stride->last_update = get_cur_time();
+  queue_u32_enqueue(&stride->queue[selected], stride->found_count[selected]);
+}
+
+void stride_scheduler_reset(struct stride_scheduler *stride) {
+  stride->stride_count[M_HOR] = 0;
+  stride->stride_count[M_VER] = 0;
+  stride->last_update = get_cur_time();
+}
+
+u8 stride_scheduler_check_update(struct stride_scheduler *stride) {
+  if (stride->stride_size == 1) return 0;
+  // Update every 60 seconds
+  if ((get_cur_time() - stride->last_update) > 60 * 1000) { 
+    return 1;
+  }
+  return 0;
+}
+
+enum VerticalMode stride_scheduler_get_mode_adaptive(struct stride_scheduler *stride) {
+  if (stride->stride_size == 2) {
+    if (queue_u32_size(&stride->queue[M_HOR]) < 6 || queue_u32_size(&stride->queue[M_VER]) < 6) {
+      return stride_scheduler_get_mode(stride);
+    }
+    enum VerticalMode mode = stride->current;
+    enum VerticalMode initial_mode = stride->current;
+    double h3 = queue_u32_gradient(&stride->queue[M_HOR], 3);
+    double h12 = queue_u32_gradient(&stride->queue[M_HOR], 12);
+    double v3 = queue_u32_gradient(&stride->queue[M_VER], 3);
+    double v12 = queue_u32_gradient(&stride->queue[M_VER], 12);
+    u32 h_count = stride->found_count[M_HOR];
+    u32 v_count = stride->found_count[M_VER];
+    u8 reset = 0;
+    if (h3 > h12 * 0.5 && v3 > v12 * 0.5) {
+      if (h3 > v3 * 2) {
+        mode = M_HOR;
+        reset = 1;
+      } else if (v3 > h3 * 2) {
+        mode = M_VER;
+        reset = 1;
+      } else {
+        // If both are similar, alternate
+        mode = stride_scheduler_get_mode(stride);
+      }
+    } else if (v3 > v12 * 0.5) {
+      mode = M_VER;
+      reset = 1;
+    } else if (h3 > h12 * 0.5) {
+      mode = M_HOR;
+      reset = 1;
+    } else {
+      // Both are not good, fallback
+      mode = stride_scheduler_get_mode(stride);
+    }
+    if (reset) {
+      stride_scheduler_reset(stride);
+    }
+    stride->previous = initial_mode;
+    stride->current = mode;
+    LOGF("[adaptive] [cur %d] [new %d] [h %u] [v %u] [h3 %f] [h12 %f] [v3 %f] [v12 %f] [rst %d]\n", initial_mode, mode, h_count, v_count, h3, h12, v3, v12, reset);
+    return mode;
+  }
+  // Fallback
+  return stride_scheduler_get_mode(stride);
+}
+
+u32 stride_scheduler_update_fount_count(struct stride_scheduler *stride, u32 found) {
+  stride->found_count[stride->current] += found;
+  return stride->found_count[stride->current];
 }
 
 // Implementation of interval tree
@@ -2379,7 +2449,7 @@ struct vertical_entry *vertical_manager_select(struct vertical_manager *manager)
   return entry;
 }
 
-enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager)  {
+enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager) {
   enum VerticalMode initial_mode = use_explore ? M_EXP : M_HOR;
   if (!manager->dynamic_mode) {
     if (get_cur_time() - manager->start_time > explore_time) {
@@ -2390,13 +2460,20 @@ enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager)
   }
   if (manager->head == NULL && manager->old == NULL) return M_HOR;
   // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
-  u8 use_vertical = !manager->use_vertical;
+  enum VerticalMode mode = manager->use_vertical ? M_VER : M_HOR;
   if (scheduler_select_mode) {
     // Use adaptive mode
+    if (stride_scheduler_check_update(stride_scheduler)) {
+      mode = stride_scheduler_get_mode_adaptive(stride_scheduler);
+      stride_scheduler_update(stride_scheduler, mode);
+    } else {
+      mode = stride_scheduler_get_mode(stride_scheduler);
+    }
   } else {
-    use_vertical = stride_scheduler_get_stride(stride_scheduler) == M_VER;
+    mode = stride_scheduler_get_mode(stride_scheduler);
+    stride_scheduler_update(stride_scheduler, mode);
   }
-  vertical_manager_set_mode(manager, use_vertical);
+  vertical_manager_set_mode(manager, mode == M_VER);
   return vertical_manager_get_mode(manager);
 }
 
@@ -4681,6 +4758,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     if (has_valid_unique_path) {
       LOGF("[moo] [uniq-path] [seed %d] [moo-id %u]\n", queue_cur ? queue_cur->entry_id : -1, hashmap_size(dfg_hashmap));
     }
+  }
+  // Stride scheduler
+  if (vertical_is_new_valuation || has_valid_unique_path) {
+    stride_scheduler_update_fount_count(stride_scheduler, 1);
   }
   if (vertical_experiment && (fault == FAULT_CRASH || fault == FAULT_NONE)) {
     if (save_to_file) {
