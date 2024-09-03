@@ -9,6 +9,8 @@
 
 // For interval tree: should be power of 2
 #define INTERVAL_SIZE 1024
+#define MAX_SCHEDULER_NUM 16
+#define MAX_QUEUE_U32_SIZE 12
 
 struct proximity_score {
   u64 original;
@@ -25,10 +27,10 @@ struct dfg_node_info {
 };
 
 enum AddQueueMode {
-  ADD_QUEUE_DEFAULT = 0,   // default: found new branch coverage
+  ADD_QUEUE_DEFAULT = 0, // default: found new branch coverage
   ADD_QUEUE_UNIQUE_VAL = 1,
-  ADD_QUEUE_UNIQUE_VAL_PER_PATH =2,
-  ADD_QUEUE_ALL = 3,  // unique_val_per_path + default
+  ADD_QUEUE_UNIQUE_VAL_PER_PATH = 2,
+  ADD_QUEUE_ALL = 3, // unique_val_per_path + default
   ADD_QUEUE_NONE = 4,
 };
 
@@ -419,10 +421,90 @@ enum VerticalMode {
   M_EXP = 2,    // Exploration mode
 };
 
+struct queue_u32 {
+  u32 size;
+  u32 front;
+  u32 rear;
+  u32 data[MAX_QUEUE_U32_SIZE];
+};
+
+struct queue_u32 *queue_u32_create() {
+  struct queue_u32 *queue = ck_alloc(sizeof(struct queue_u32));
+  queue->size = 0;
+  queue->front = 0;
+  queue->rear = 0;
+  return queue;
+}
+
+void queue_u32_free(struct queue_u32 *queue) {
+  ck_free(queue);
+}
+
+u32 queue_u32_dequeue(struct queue_u32 *queue) {
+  if (queue->size == 0) {
+    return 0;
+  }
+  u32 value = queue->data[queue->front];
+  queue->front = (queue->front + 1) % 12;
+  queue->size--;
+  return value;
+}
+
+void queue_u32_enqueue(struct queue_u32 *queue, u32 value) {
+  if (queue->size == MAX_QUEUE_U32_SIZE) {
+    // Dequeue the front element
+    queue_u32_dequeue(queue);
+  }
+  queue->data[queue->rear] = value;
+  queue->rear = (queue->rear + 1) % MAX_QUEUE_U32_SIZE;
+  queue->size++;
+}
+
+u32 queue_u32_size(struct queue_u32 *queue) {
+  return queue->size;
+}
+
+u32 queue_u32_peek(struct queue_u32 *queue, u32 index) {
+  if (index >= queue->size) {
+    return 0;
+  }
+  return queue->data[(queue->front + index) % MAX_QUEUE_U32_SIZE];
+}
+
+double queue_u32_gradient(struct queue_u32 *queue, u32 last) {
+  if (queue->size == 0)
+    return 0.0;
+  u32 front = queue_u32_peek(queue, 0);
+  last = last > queue->size ? queue->size : last;
+  u32 rear = queue_u32_peek(queue, last - 1);
+  return (double)(rear - front) / (double)(last);
+}
+
+struct stride_scheduler {
+  u32 stride_values[MAX_SCHEDULER_NUM];
+  u32 stride_count[MAX_SCHEDULER_NUM];
+  u32 found_count[MAX_SCHEDULER_NUM]; // Update if found new dug path, valuation.
+  struct queue_u32 queue[MAX_SCHEDULER_NUM]; // Store the last N found_count
+  u32 stride_size;
+  u64 last_update;
+  enum VerticalMode previous;
+  enum VerticalMode current;
+  u32 count_consecutive; // Count the number of consecutive selection of current
+};
+
+struct stride_scheduler *stride_scheduler_create();
+enum VerticalMode stride_scheduler_get_mode(struct stride_scheduler *stride);
+void stride_scheduler_update(struct stride_scheduler *stride, enum VerticalMode selected);
+void stride_scheduler_reset(struct stride_scheduler *stride);
+u8 stride_scheduler_check_update(struct stride_scheduler *stride);
+enum VerticalMode stride_scheduler_get_mode_adaptive(struct stride_scheduler *stride);
+u32 stride_scheduler_update_found_count(struct stride_scheduler *stride, u32 found);
+
 struct vertical_entry {
   u32 hash;                   // dfg path hash
   u32 use_count;
   struct vector *entries;
+  struct vector *old_entries;
   struct vertical_entry *next;
   struct hashmap *value_map;  // valuation hash
 };
@@ -443,6 +525,7 @@ struct vertical_entry *vertical_entry_create(u32 hash) {
   entry->hash = hash;
   entry->use_count = 0;
   entry->entries = vector_create();
+  entry->old_entries = vector_create();
   entry->next = NULL;
   entry->value_map = hashmap_create(8);
   return entry;
@@ -512,7 +595,7 @@ void vertical_manager_set_mode(struct vertical_manager *manager, u8 use_vertical
   manager->use_vertical = use_vertical;
 }
 
-void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry) {
+void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q) {
   if (manager->old == NULL) {
     manager->old = entry;
   } else {
@@ -522,6 +605,7 @@ void vertical_manager_insert_to_old(struct vertical_manager *manager, struct ver
     }
     ve->next = entry;
   }
+  push_back(entry->old_entries, q);
 }
 
 void vertical_manager_free(struct vertical_manager *manager) {
