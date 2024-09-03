@@ -111,7 +111,7 @@ static u8 vertical_experiment = 0;
 
 static u64 explore_time = 15 * 60 * 1000; // 15 minutes
 static u64 use_explore = 0;
-static enum AddQueueMode add_queue_mode = 0;
+static enum AddQueueMode add_queue_mode = ADD_QUEUE_ALL;
 
 static struct vertical_manager *vertical_manager = NULL;
 static struct pareto_scheduler *pareto_scheduler = NULL;
@@ -283,7 +283,7 @@ static u32 max_queue_size = 4096;          /* Maximum input in queue            
 static u32 unique_dafl_input = 0;     /* Number of unique input with new coverage on def-use graph */
 static FILE* unique_dafl_log_file = NULL; /* File to record unique input with new coverage on def-use graph */
 static u8 ignore_crash_loc = 0;         /* Ignore crash location in unique input */
-static u8 scheduler_select_mode = 0;    /* Scheduler selection mode */
+static u8 use_adaptive_scheduler_selection = 1;    /* Scheduler selection mode */
 static double scheduler_select_ratio = 0.5; /* Ratio for vertical scheduler selection */
 static struct stride_scheduler *stride_scheduler = NULL; /* Stride scheduler */
 
@@ -2478,7 +2478,7 @@ enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager)
   if (manager->head == NULL && manager->old == NULL) return M_HOR;
   // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
   enum VerticalMode mode = manager->use_vertical ? M_VER : M_HOR;
-  if (scheduler_select_mode) {
+  if (use_adaptive_scheduler_selection) {
     // Use adaptive mode
     if (stride_scheduler_check_update(stride_scheduler)) {
       mode = stride_scheduler_get_mode_adaptive(stride_scheduler);
@@ -2496,7 +2496,7 @@ enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager)
 
 enum VerticalMode vertical_manager_get_mode(struct vertical_manager *manager) {
   enum VerticalMode initial_mode = use_explore ? M_EXP : M_HOR;
-  if (add_queue_mode == 4) return M_EXP;
+  if (add_queue_mode == ADD_QUEUE_NONE) return M_EXP;
   if (manager->head == NULL && manager->old == NULL) return initial_mode;
   if (!manager->dynamic_mode) return initial_mode;
   return manager->use_vertical ? M_VER : M_HOR;
@@ -11724,7 +11724,9 @@ int main(int argc, char** argv) {
       option = strtok(optarg, ":");
       value_str = strtok(NULL, ":");
       if (option[0] == 'a') {
-        scheduler_select_mode = 1;
+        use_adaptive_scheduler_selection = 1;
+      } else if (option[0] == 'd') {
+        use_adaptive_scheduler_selection = 0;
       }
       if (value_str) {
         scheduler_select_ratio = atof(value_str);
