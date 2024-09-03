@@ -876,7 +876,7 @@ struct stride_scheduler *stride_scheduler_create() {
 enum VerticalMode stride_scheduler_get_mode(struct stride_scheduler *stride) {
   stride->previous = stride->current;
   if (stride->stride_size == 2) {
-    if (stride->stride_count[M_HOR] <= stride->stride_values[M_HOR]) {
+    if (stride->stride_count[M_HOR] <= stride->stride_count[M_VER]) {
       stride->current = M_HOR;
     } else {
       stride->current = M_VER;
@@ -953,7 +953,7 @@ enum VerticalMode stride_scheduler_get_mode_adaptive(struct stride_scheduler *st
   return stride_scheduler_get_mode(stride);
 }
 
-u32 stride_scheduler_update_fount_count(struct stride_scheduler *stride, u32 found) {
+u32 stride_scheduler_update_found_count(struct stride_scheduler *stride, u32 found) {
   stride->found_count[stride->current] += found;
   return stride->found_count[stride->current];
 }
@@ -1180,6 +1180,7 @@ void pareto_scheduler_push(struct pareto_scheduler *scheduler, struct queue_entr
 
 struct queue_entry *pareto_scheduler_moo_pop(struct pareto_scheduler *scheduler) {
   if (vector_size(scheduler->moo_pareto_frontier) == 0) {
+    update_dfg_score_moo();
     // If the frontier is empty, select from dominated queue
     struct vector *new_entries = scheduler->moo_newly_added;
     struct vector *dominated = scheduler->moo_dominated;
@@ -1282,8 +1283,18 @@ void pareto_scheduler_moo_remove(struct pareto_scheduler *scheduler, struct queu
       return;
   }
   u32 index = entry->moo_info.index;
-  vector_set(vec, index, NULL);
-  pareto_info_set(&entry->moo_info, PARETO_RECYCLED, index);
+  u32 size = vector_size(vec);
+  for (u32 i = index + 1; i < size; i++) {
+    struct queue_entry *q = vector_get(vec, i);
+    pareto_info_set(&q->moo_info, q->moo_info.status, i - 1);
+  }
+  struct queue_entry *removed = vector_pop(vec, index);
+  if (removed != entry) {
+    LOGF("[error] [moo] [remove] [id %d] [status %d] [index %d] [removed %d] [time %llu]\n", 
+      entry->entry_id, entry->moo_info.status, entry->moo_info.index, removed ? removed->entry_id : -1, get_cur_time() - start_time);
+  }
+  push_back(scheduler->moo_recycled, entry);
+  pareto_info_set(&entry->moo_info, PARETO_RECYCLED, vector_size(scheduler->moo_recycled) - 1);
 }
 
 struct queue_entry *pareto_scheduler_explore_pop(struct pareto_scheduler *scheduler) {
@@ -1391,11 +1402,17 @@ void pareto_scheduler_explore_remove(struct pareto_scheduler *scheduler, struct 
       return;
   }
   u32 index = entry->explore_info.index;
+  u32 size = vector_size(vec);
+  for (u32 i = index + 1; i < size; i++) {
+    struct queue_entry *q = vector_get(vec, i);
+    pareto_info_set(&q->explore_info, q->explore_info.status, i - 1);
+  }
   struct queue_entry *removed = vector_pop(vec, index);
   if (removed != entry) {
     LOGF("[error] [explore] [remove] [id %d] [status %d] [index %d] [removed %d] [time %llu]\n", 
       entry->entry_id, entry->explore_info.status, entry->explore_info.index, removed ? removed->entry_id : -1, get_cur_time() - start_time);
   }
+  vector_pop(vec, index);
   push_back(scheduler->explore_recycled, entry);
   pareto_info_set(&entry->explore_info, PARETO_RECYCLED, vector_size(scheduler->explore_recycled) - 1);
 }
@@ -2019,7 +2036,7 @@ static void update_global_prox_score(struct proximity_score *prox_score) {
 
 }
 
-static void update_dfg_score_moo() {
+void update_dfg_score_moo() {
   init_global_prox_score(); // Reset the global proximity score: max, min, total, avg
   struct queue_entry *q = queue;
   while (q) {
@@ -2430,7 +2447,7 @@ static void cull_queue(void) {
 
 }
 
-struct vertical_entry *vertical_manager_select(struct vertical_manager *manager) {
+struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *manager) {
   if (manager->head == NULL && manager->old == NULL) return NULL;
   // Pop from head
   struct vertical_entry *entry = manager->head;
@@ -2502,15 +2519,22 @@ static struct queue_entry* select_next_entry_dafl() {
 }
 
 static struct queue_entry* select_next_entry_vertical() {
-  struct vertical_entry *entry = vertical_manager_select(vertical_manager);
+  struct vertical_entry *entry = vertical_manager_select_entry(vertical_manager);
   struct queue_entry* q = NULL;
   if (!entry) return NULL;
 
-  q = vector_pop_front(entry->entries);
-  if (vector_size(entry->entries) > 0) {
-    // push back to the old queue
-    vertical_manager_insert_to_old(vertical_manager, entry);
+  if (vector_size(entry->entries) == 0) {
+    // Recycle the old entries
+    u32 size = vector_size(entry->old_entries);
+    for (u32 i = 0; i < size; i++) {
+      struct queue_entry *old_q = vector_get(entry->old_entries, size - 1 - i);
+      push_back(entry->entries, old_q);
+    }
+    vector_clear(entry->old_entries);
   }
+  q = vector_pop_back(entry->entries);
+  // push back to the old queue
+  vertical_manager_insert_to_old(vertical_manager, entry, q);
   LOGF("[sel] [vertical] [id %d] [dfg-path %u] [time %llu]\n", q ? q->entry_id : -1, entry->hash, get_cur_time() - start_time);
   return q;
 }
@@ -3945,7 +3969,64 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   }
 }
 
-static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cksum, struct queue_entry* q, u32 *val_hash) {
+static void save_valuation(u8 crashed, u8 is_unique, u32 dfg_cksum, u32 hash, struct queue_entry* q, u8 *valuation_file) {
+  // Save to file if unique
+  if (is_unique) {
+    hashmap_insert(unique_mem_hashmap, hash, NULL);
+    u8 *target_file = alloc_printf("memory/%s/id:%06llu", crashed ? "neg" : "pos",
+                                   crashed ? total_saved_crashes : total_saved_positives);
+    LOGF("[pacfix] [mem] [%s] [seed %d] [entry %d] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1,
+       crashed ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
+    u8 *target_file_full = alloc_printf("%s/%s", out_dir, target_file);
+    rename(valuation_file, target_file_full);
+    ck_free(valuation_file);
+    ck_free(target_file);
+    ck_free(target_file_full);
+    if (crashed) {
+      total_saved_crashes++;
+    } else {
+      total_saved_positives++;
+    }
+  }
+  
+  if (no_unique_val) {
+    LOGF("[nuv] [dfg-path %u] [hash %u] [seed %d] [crash %u] [time %llu]\n", dfg_cksum, hash, queue_cur ? queue_cur->entry_id : -1, crashed, get_cur_time() - start_time);
+  }
+  struct key_value_pair *local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
+  if (!local_kvp) {
+    struct vertical_entry *ve = vertical_entry_create(dfg_cksum);
+    hashmap_insert(vertical_manager->map, dfg_cksum, ve);
+    LOGF("[vertical] [entry-add-late] [id %u] [checksum %u]\n", hashmap_size(vertical_manager->map), dfg_cksum);
+    local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
+  }
+  if (local_kvp) {
+    struct vertical_entry *local_entry = local_kvp->value;
+    struct hashmap *local_valuation_hashmap = local_entry->value_map;
+    struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
+    if (no_unique_val) {
+      vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
+      if (!local_valuation_kvp)
+        hashmap_insert(local_valuation_hashmap, hash, q);
+    } else {
+      if (local_valuation_kvp) {
+        if (q && !local_valuation_kvp->value) {
+          local_valuation_kvp->value = q;
+        }
+        remove(tmpfile);
+        ck_free(tmpfile);
+        return 0;
+      } else {
+        vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
+        hashmap_insert(local_valuation_hashmap, hash, q);
+        LOGF("[vertical] [valuation] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
+      }
+    }
+  } else {
+    SAYF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
+  }
+}
+
+static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cksum, u32 *val_hash, u8 **valuation_file) {
   u8 *valexe = "";
   u8 *covdir = "";
   u8 *tmpfile = "";
@@ -3955,6 +4036,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   u32 num = 1 + UR(ARITH_MAX);
 
   *val_hash = 0;
+  *valuation_file = NULL;
 
   if(!getenv("PACFIX_VAL_EXE")) return 0;
   if(!getenv("PACFIX_COV_DIR")) return 0;
@@ -3982,71 +4064,28 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   u32 hash = hash_file(tmpfile);
   *val_hash = hash;
   struct key_value_pair *kvp = hashmap_get(unique_mem_hashmap, hash);
-  if (q) {
-    LOGF("[vertical] [entry] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [crash %u] [time %llu] [last-loc %d]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(unique_mem_hashmap), crashed, get_cur_time() - start_time, q ? q->last_location : -1);
-  }
-  if (no_unique_val) {
-    LOGF("[nuv] [dfg-path %u] [hash %u] [seed %d] [crash %u] [time %llu]\n", dfg_cksum, hash, queue_cur ? queue_cur->entry_id : -1, crashed, get_cur_time() - start_time);
-  }
   // Check if the hash is already in the hashmap
-  if (vertical_experiment || vertical_use_dynamic) {
-    struct key_value_pair* local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
+  if (kvp) {
+    remove(tmpfile);
+    ck_free(tmpfile);
+    struct key_value_pair *local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
     if (!local_kvp) {
       struct vertical_entry *ve = vertical_entry_create(dfg_cksum);
       hashmap_insert(vertical_manager->map, dfg_cksum, ve);
       LOGF("[vertical] [entry-add-late] [id %u] [checksum %u]\n", hashmap_size(vertical_manager->map), dfg_cksum);
       local_kvp = hashmap_get(vertical_manager->map, dfg_cksum);
     }
-    if (local_kvp) {
-      struct vertical_entry *local_entry = local_kvp->value;
-      struct hashmap *local_valuation_hashmap = local_entry->value_map;
-      struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
-      if (no_unique_val) {
-        vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
-        if (!local_valuation_kvp)
-          hashmap_insert(local_valuation_hashmap, hash, q);
-      } else {
-        if (local_valuation_kvp) {
-          if (q && !local_valuation_kvp->value) {
-            local_valuation_kvp->value = q;
-          }
-          remove(tmpfile);
-          ck_free(tmpfile);
-          return 0;
-        } else {
-          vertical_is_new_valuation = 1;
-          vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
-          hashmap_insert(local_valuation_hashmap, hash, q);
-          LOGF("[vertical] [valuation] [seed %d] [entry %d] [dfg-path %u] [hash %u] [id %u] [persistent %u] [time %llu]\n", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1, dfg_cksum, hash, hashmap_size(local_valuation_hashmap), vertical_is_persistent, get_cur_time() - start_time);
-        }
-      }
-    } else {
-      SAYF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
-    }
-  }
-
-  if (kvp) {
-    remove(tmpfile);
-    ck_free(tmpfile);
+    struct vertical_entry *local_entry = local_kvp->value;
+    struct hashmap *local_valuation_hashmap = local_entry->value_map;
+    struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
+    if (!local_valuation_kvp)
+      vertical_is_new_valuation = 1;
     return 0;
-  }
-  u8* target_file = alloc_printf("memory/%s/id:%06llu", crashed ? "neg" : "pos",
-                                 crashed ? total_saved_crashes : total_saved_positives);
-  hashmap_insert(unique_mem_hashmap, hash, NULL);
-  LOGF("[pacfix] [mem] [%s] [seed %d] [entry %d] [id %llu] [hash %u] [time %llu] [file %s]\n", crashed == 1 ? "neg" : "pos", queue_cur ? queue_cur->entry_id : -1, q ? q->entry_id : -1,
-       crashed ? total_saved_crashes : total_saved_positives, hash, get_cur_time() - start_time, target_file);
-
-  vertical_is_new_valuation = 1;
-  if (crashed) {
-    total_saved_crashes++;
   } else {
-    total_saved_positives++;
+    *valuation_file = tmpfile;
+    vertical_is_new_valuation = 1;
+    return 1;
   }
-  u8* target_file_full = alloc_printf("%s/%s", out_dir, target_file);
-  rename(tmpfile, target_file_full);
-  ck_free(tmpfile);
-  ck_free(target_file);
-  ck_free(target_file_full);
   return 1;
 
 }
@@ -4306,6 +4345,8 @@ static void perform_dry_run(char** argv, char *base_crash_seed) {
     u32 checksum = get_dfg_checksum();
     q->dfg_cksum = checksum;
     q->last_location = *last_location;
+    u8 *valuation_file;
+    u8 val_result = 0;
     LOGF("[vertical] [dry-run] [id %u] [dfg-path %u] [res %u] [file %s] [last-loc %u]\n", q->entry_id, checksum, res, q->fname, *last_location);
 
     if (stop_soon) return;
@@ -4326,7 +4367,8 @@ static void perform_dry_run(char** argv, char *base_crash_seed) {
             check_unique_path();
           }
           u32 val_hash;
-          get_valuation(0, argv, use_mem, q->len, checksum, q, &val_hash);
+          val_result = get_valuation(0, argv, use_mem, q->len, checksum, &val_hash, &valuation_file);
+          save_valuation(0, val_result, checksum, val_hash, q, valuation_file);
         }
 
         break;
@@ -4389,7 +4431,8 @@ static void perform_dry_run(char** argv, char *base_crash_seed) {
             check_unique_path();
           }
           u32 val_hash;
-          get_valuation(1, argv, use_mem, q->len, checksum, q, &val_hash);
+          val_result = get_valuation(1, argv, use_mem, q->len, checksum, &val_hash, &valuation_file);
+          save_valuation(1, val_result, checksum, val_hash, q, valuation_file);
         }
 
         if (crash_mode) break;
@@ -4742,6 +4785,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8 save_to_file = 0;
   u8 has_unique_val_per_path = 0;
   u32 val_hash;
+  u8 *valuation;
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
   u32 dfg_checksum = get_dfg_checksum();
@@ -4751,7 +4795,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   if (dfg_node_info_map) {
     if (check_covered_target()) {
       if (fault == FAULT_CRASH || fault == FAULT_NONE) {
-        save_to_file = get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum, NULL, &val_hash);
+        save_to_file = get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum, &val_hash, &valuation);
       }
     }
     has_valid_unique_path = check_unique_path();
@@ -4761,7 +4805,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   }
   // Stride scheduler
   if (vertical_is_new_valuation || has_valid_unique_path) {
-    stride_scheduler_update_fount_count(stride_scheduler, 1);
+    stride_scheduler_update_found_count(stride_scheduler, 1);
   }
   if (vertical_experiment && (fault == FAULT_CRASH || fault == FAULT_NONE)) {
     if (save_to_file) {
@@ -4913,6 +4957,7 @@ keep_as_crash:
 
       if (!check_coverage(1, argv, mem, len)) return keeping;
       // save_to_file = get_valuation(1, argv, mem, len, dfg_checksum, new_seed, &val_hash);
+      save_valuation(1, save_to_file, dfg_checksum, val_hash, new_seed, valuation);
 
       /* This is handled in a manner roughly similar to timeouts,
          except for slightly different limits and no need to re-run test
@@ -4963,7 +5008,7 @@ keep_as_crash:
     case FAULT_NONE:
       if (!check_coverage(0, argv, mem, len)) return keeping;
       // save_to_file = get_valuation(0, argv, mem, len, dfg_checksum, new_seed, &val_hash);
-
+      save_valuation(0, save_to_file, dfg_checksum, val_hash, new_seed, valuation);
       total_normals++;
 
 #ifndef SIMPLE_FILES

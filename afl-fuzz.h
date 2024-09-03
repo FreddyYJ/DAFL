@@ -498,12 +498,13 @@ void stride_scheduler_update(struct stride_scheduler *stride, enum VerticalMode 
 void stride_scheduler_reset(struct stride_scheduler *stride);
 u8 stride_scheduler_check_update(struct stride_scheduler *stride);
 enum VerticalMode stride_scheduler_get_mode_adaptive(struct stride_scheduler *stride);
-u32 stride_scheduler_update_fount_count(struct stride_scheduler *stride, u32 found);
+u32 stride_scheduler_update_found_count(struct stride_scheduler *stride, u32 found);
 
 struct vertical_entry {
   u32 hash;                   // dfg path hash
   u32 use_count;
   struct vector *entries;
+  struct vector *old_entries;
   struct vertical_entry *next;
   struct hashmap *value_map;  // valuation hash
 };
@@ -524,6 +525,7 @@ struct vertical_entry *vertical_entry_create(u32 hash) {
   entry->hash = hash;
   entry->use_count = 0;
   entry->entries = vector_create();
+  entry->old_entries = vector_create();
   entry->next = NULL;
   entry->value_map = hashmap_create(8);
   return entry;
@@ -593,7 +595,7 @@ void vertical_manager_set_mode(struct vertical_manager *manager, u8 use_vertical
   manager->use_vertical = use_vertical;
 }
 
-void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry) {
+void vertical_manager_insert_to_old(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q) {
   if (manager->old == NULL) {
     manager->old = entry;
   } else {
@@ -603,6 +605,7 @@ void vertical_manager_insert_to_old(struct vertical_manager *manager, struct ver
     }
     ve->next = entry;
   }
+  push_back(entry->old_entries, q);
 }
 
 void vertical_manager_free(struct vertical_manager *manager) {
