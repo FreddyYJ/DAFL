@@ -4787,6 +4787,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
   u32 dfg_checksum = get_dfg_checksum();
+  vertical_is_new_valuation = 0;
   pareto_scheduler_update_dfg_count(pareto_scheduler, dfg_checksum);
   // LOGF("[sii] [seed %d] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
   //      queue_cur ? queue_cur->entry_id : -1, dfg_checksum, check_covered_target(), prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
@@ -4821,6 +4822,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     case ADD_QUEUE_UNIQUE_VAL:  is_interesting = save_to_file; break;
     case ADD_QUEUE_ALL:  is_interesting = (hnb || vertical_is_new_valuation); break;
     case ADD_QUEUE_NONE:  is_interesting = 0; break;
+    default: is_interesting = hnb; break;
     }
     if (is_interesting) {
 
