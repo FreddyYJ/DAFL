@@ -11803,6 +11803,13 @@ int main(int argc, char** argv) {
   setup_dirs_fds();
   read_testcases();
   load_auto();
+  char *tmp_arg_str = ck_alloc(4096);
+  for (u32 i = 0; i < argc; i++) {
+    strcat(tmp_arg_str, argv[i]);
+    strcat(tmp_arg_str, " ");
+  }
+  LOGF("[options] [cmd \"%s\"]\n", tmp_arg_str);
+  ck_free(tmp_arg_str);
 
   pivot_inputs();
 
