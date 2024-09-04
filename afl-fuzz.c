@@ -4782,8 +4782,12 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8 has_valid_unique_path = 0;
   u8 save_to_file = 0;
   u8 has_unique_val_per_path = 0;
-  u32 val_hash;
-  u8 *valuation;
+  u32 val_hash = 0;
+  u8 *valuation = NULL;
+  u8 is_covered_target = 0;
+  if (fault == FAULT_CRASH || fault == FAULT_NONE) {
+    is_covered_target = check_coverage(fault == FAULT_CRASH, argv, mem, len);
+  }
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
   u32 dfg_checksum = get_dfg_checksum();
@@ -4792,10 +4796,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   // LOGF("[sii] [seed %d] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
   //      queue_cur ? queue_cur->entry_id : -1, dfg_checksum, check_covered_target(), prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
   if (dfg_node_info_map) {
-    if (check_covered_target()) {
-      if (fault == FAULT_CRASH || fault == FAULT_NONE) {
-        save_to_file = get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum, &val_hash, &valuation);
-      }
+    if (is_covered_target) {
+      save_to_file = get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum, &val_hash, &valuation);
     }
     has_valid_unique_path = check_unique_path();
     if (has_valid_unique_path) {
@@ -4955,7 +4957,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
 keep_as_crash:
 
-      if (!check_coverage(1, argv, mem, len)) return keeping;
+      if (!is_covered_target) return keeping;
       // save_to_file = get_valuation(1, argv, mem, len, dfg_checksum, new_seed, &val_hash);
       save_valuation(1, save_to_file, dfg_checksum, val_hash, new_seed, valuation);
 
@@ -5006,7 +5008,7 @@ keep_as_crash:
 
       break;
     case FAULT_NONE:
-      if (!check_coverage(0, argv, mem, len)) return keeping;
+      if (!is_covered_target) return keeping;
       // save_to_file = get_valuation(0, argv, mem, len, dfg_checksum, new_seed, &val_hash);
       save_valuation(0, save_to_file, dfg_checksum, val_hash, new_seed, valuation);
       total_normals++;
