@@ -6779,7 +6779,7 @@ void init_mutation_vertical(void) {
 
 void log_single_mutator_selection(u32 mutator, double location) {
   u32 score = vertical_is_persistent + 16 * vertical_is_new_valuation;
-  fprintf(moo_vertical_log_file, "d,%u,%u,%u,%u,%.4f\n",
+  fprintf(moo_vertical_log_file, "d,%u,%u,%u,%u,%.6f\n",
           vertical_is_persistent, vertical_is_interesting, vertical_is_new_valuation, mutator, location);
   interval_tree_insert(vertical_manager->tree, quantize_location(location), score);
 }
@@ -6790,7 +6790,7 @@ void log_mutator_selection(u32* mutator, double* location, u32 stacking) {
   u32 mut_cnt[OPERATOR_NUM];
   memset(mut_cnt, 0, sizeof(mut_cnt));
   for (u32 i = 0; i < stacking; i++) {
-    fprintf(moo_vertical_log_file, "v,%u,%u,%u,%u,%.4f\n",
+    fprintf(moo_vertical_log_file, "v,%u,%u,%u,%u,%.6f\n",
             vertical_is_persistent, vertical_is_interesting, vertical_is_new_valuation, mutator[i], location[i]);
     // Update score for mutator
     u32 mut = mutator[i];
