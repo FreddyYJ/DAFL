@@ -111,7 +111,7 @@ static u8 vertical_experiment = 0;
 
 static u64 explore_time = 15 * 60 * 1000; // 15 minutes
 static u64 use_explore = 0;
-static enum AddQueueMode add_queue_mode = ADD_QUEUE_ALL;
+static enum AddQueueMode add_queue_mode = ADD_QUEUE_DEFAULT;
 
 static struct vertical_manager *vertical_manager = NULL;
 static struct pareto_scheduler *pareto_scheduler = NULL;
@@ -283,7 +283,7 @@ static u32 max_queue_size = 4096;          /* Maximum input in queue            
 static u32 unique_dafl_input = 0;     /* Number of unique input with new coverage on def-use graph */
 static FILE* unique_dafl_log_file = NULL; /* File to record unique input with new coverage on def-use graph */
 static u8 ignore_crash_loc = 0;         /* Ignore crash location in unique input */
-static u8 use_adaptive_scheduler_selection = 1;    /* Scheduler selection mode */
+static u8 use_adaptive_scheduler_selection = 0;    /* Scheduler selection mode */
 static double scheduler_select_ratio = 0.5; /* Ratio for vertical scheduler selection */
 static struct stride_scheduler *stride_scheduler = NULL; /* Stride scheduler */
 
@@ -2478,17 +2478,16 @@ enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager)
   if (manager->head == NULL && manager->old == NULL) return M_HOR;
   // If the dynamic mode is enabled, use vertical and horizontal mode iteratively
   enum VerticalMode mode = manager->use_vertical ? M_VER : M_HOR;
-  if (use_adaptive_scheduler_selection) {
-    // Use adaptive mode
-    if (stride_scheduler_check_update(stride_scheduler)) {
+  if (stride_scheduler_check_update(stride_scheduler)) {
+    if (use_adaptive_scheduler_selection) {
+      // Use adaptive mode
       mode = stride_scheduler_get_mode_adaptive(stride_scheduler);
-      stride_scheduler_update(stride_scheduler, mode);
     } else {
       mode = stride_scheduler_get_mode(stride_scheduler);
     }
+    stride_scheduler_update(stride_scheduler, mode);
   } else {
     mode = stride_scheduler_get_mode(stride_scheduler);
-    stride_scheduler_update(stride_scheduler, mode);
   }
   vertical_manager_set_mode(manager, mode == M_VER);
   return vertical_manager_get_mode(manager);
