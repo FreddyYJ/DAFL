@@ -6777,6 +6777,13 @@ void init_mutation_vertical(void) {
   vertical_is_new_valuation = 0;
 }
 
+void log_single_mutator_selection(u32 mutator, double location) {
+  u32 score = vertical_is_persistent + 16 * vertical_is_new_valuation;
+  fprintf(moo_vertical_log_file, "d,%u,%u,%u,%u,%.4f\n",
+          vertical_is_persistent, vertical_is_interesting, vertical_is_new_valuation, mutator, location);
+  interval_tree_insert(vertical_manager->tree, quantize_location(location), score);
+}
+
 void log_mutator_selection(u32* mutator, double* location, u32 stacking) {
   // 4 * vertical_is_interesting
   u32 score = vertical_is_persistent + 16 * vertical_is_new_valuation;
@@ -6985,9 +6992,11 @@ static u8 fuzz_one_vertical(char** argv) {
     stage_cur_byte = stage_cur >> 3;
 
     FLIP_BIT(out_buf, stage_cur);
+    init_mutation_vertical();
 
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
+    log_single_mutator_selection(0, (double)stage_cur / (double)stage_max);
     FLIP_BIT(out_buf, stage_cur);
 
     /* While flipping the least significant bit in every byte, pull of an extra
@@ -7078,9 +7087,11 @@ static u8 fuzz_one_vertical(char** argv) {
 
     FLIP_BIT(out_buf, stage_cur);
     FLIP_BIT(out_buf, stage_cur + 1);
+    init_mutation_vertical();
 
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
+    log_single_mutator_selection(1, (double)stage_cur / (double)stage_max);
     FLIP_BIT(out_buf, stage_cur);
     FLIP_BIT(out_buf, stage_cur + 1);
 
@@ -7107,9 +7118,11 @@ static u8 fuzz_one_vertical(char** argv) {
     FLIP_BIT(out_buf, stage_cur + 1);
     FLIP_BIT(out_buf, stage_cur + 2);
     FLIP_BIT(out_buf, stage_cur + 3);
+    init_mutation_vertical();
 
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
+    log_single_mutator_selection(2, (double)stage_cur / (double)stage_max);
     FLIP_BIT(out_buf, stage_cur);
     FLIP_BIT(out_buf, stage_cur + 1);
     FLIP_BIT(out_buf, stage_cur + 2);
@@ -7159,8 +7172,10 @@ static u8 fuzz_one_vertical(char** argv) {
     stage_cur_byte = stage_cur;
 
     out_buf[stage_cur] ^= 0xFF;
+    init_mutation_vertical();
 
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+    log_single_mutator_selection(3, (double)stage_cur / (double)stage_max);
 
     /* We also use this stage to pull off a simple trick: we identify
        bytes that seem to have no effect on the current execution path
@@ -7237,8 +7252,11 @@ static u8 fuzz_one_vertical(char** argv) {
     stage_cur_byte = i;
 
     *(u16*)(out_buf + i) ^= 0xFFFF;
+    init_mutation_vertical();
 
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+
+    log_single_mutator_selection(4, (double)i / (double)stage_max);
     stage_cur++;
 
     *(u16*)(out_buf + i) ^= 0xFFFF;
@@ -7274,8 +7292,10 @@ static u8 fuzz_one_vertical(char** argv) {
     stage_cur_byte = i;
 
     *(u32*)(out_buf + i) ^= 0xFFFFFFFF;
+    init_mutation_vertical();
 
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+    log_single_mutator_selection(5, (double)i / (double)stage_max);
     stage_cur++;
 
     *(u32*)(out_buf + i) ^= 0xFFFFFFFF;
@@ -7330,8 +7350,10 @@ skip_bitflip:
 
         stage_cur_val = j;
         out_buf[i] = orig + j;
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(6, (double)i / (double)len);
         stage_cur++;
 
       } else stage_max--;
@@ -7342,8 +7364,10 @@ skip_bitflip:
 
         stage_cur_val = -j;
         out_buf[i] = orig - j;
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(6, (double)i / (double)len);
         stage_cur++;
 
       } else stage_max--;
@@ -7401,8 +7425,10 @@ skip_bitflip:
 
         stage_cur_val = j;
         *(u16*)(out_buf + i) = orig + j;
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(7, (double)i / (double)(len-1));
         stage_cur++;
 
       } else stage_max--;
@@ -7411,8 +7437,10 @@ skip_bitflip:
 
         stage_cur_val = -j;
         *(u16*)(out_buf + i) = orig - j;
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(7, (double)i / (double)(len-1));
         stage_cur++;
 
       } else stage_max--;
@@ -7426,8 +7454,10 @@ skip_bitflip:
 
         stage_cur_val = j;
         *(u16*)(out_buf + i) = SWAP16(SWAP16(orig) + j);
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(7, (double)i / (double)(len-1));
         stage_cur++;
 
       } else stage_max--;
@@ -7436,8 +7466,10 @@ skip_bitflip:
 
         stage_cur_val = -j;
         *(u16*)(out_buf + i) = SWAP16(SWAP16(orig) - j);
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(7, (double)i / (double)(len-1));
         stage_cur++;
 
       } else stage_max--;
@@ -7494,8 +7526,10 @@ skip_bitflip:
 
         stage_cur_val = j;
         *(u32*)(out_buf + i) = orig + j;
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(8, (double)i / (double)(len-3));
         stage_cur++;
 
       } else stage_max--;
@@ -7504,8 +7538,10 @@ skip_bitflip:
 
         stage_cur_val = -j;
         *(u32*)(out_buf + i) = orig - j;
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(8, (double)i / (double)(len-3));
         stage_cur++;
 
       } else stage_max--;
@@ -7518,8 +7554,10 @@ skip_bitflip:
 
         stage_cur_val = j;
         *(u32*)(out_buf + i) = SWAP32(SWAP32(orig) + j);
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(8, (double)i / (double)(len-3));
         stage_cur++;
 
       } else stage_max--;
@@ -7528,8 +7566,10 @@ skip_bitflip:
 
         stage_cur_val = -j;
         *(u32*)(out_buf + i) = SWAP32(SWAP32(orig) - j);
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(8, (double)i / (double)(len-3));
         stage_cur++;
 
       } else stage_max--;
@@ -7587,9 +7627,11 @@ skip_arith:
 
       stage_cur_val = interesting_8[j];
       out_buf[i] = interesting_8[j];
+      init_mutation_vertical();
 
       if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
+      log_single_mutator_selection(9, (double)i / (double)len);
       out_buf[i] = orig;
       stage_cur++;
 
@@ -7640,8 +7682,10 @@ skip_arith:
         stage_val_type = STAGE_VAL_LE;
 
         *(u16*)(out_buf + i) = interesting_16[j];
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(10, (double)i / (double)(len-1));
         stage_cur++;
 
       } else stage_max--;
@@ -7654,7 +7698,9 @@ skip_arith:
         stage_val_type = STAGE_VAL_BE;
 
         *(u16*)(out_buf + i) = SWAP16(interesting_16[j]);
+        init_mutation_vertical();
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(10, (double)i / (double)(len-1));
         stage_cur++;
 
       } else stage_max--;
@@ -7709,8 +7755,10 @@ skip_arith:
         stage_val_type = STAGE_VAL_LE;
 
         *(u32*)(out_buf + i) = interesting_32[j];
+        init_mutation_vertical();
 
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(11, (double)i / (double)(len-3));
         stage_cur++;
 
       } else stage_max--;
@@ -7723,7 +7771,9 @@ skip_arith:
         stage_val_type = STAGE_VAL_BE;
 
         *(u32*)(out_buf + i) = SWAP32(interesting_32[j]);
+        init_mutation_vertical();
         if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+        log_single_mutator_selection(11, (double)i / (double)(len-3));
         stage_cur++;
 
       } else stage_max--;
@@ -7788,8 +7838,11 @@ skip_interest:
 
       last_len = extras[j].len;
       memcpy(out_buf + i, extras[j].data, last_len);
+      init_mutation_vertical();
 
       if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+
+      log_single_mutator_selection(12, (double)i / (double)len);
 
       stage_cur++;
 
@@ -7832,11 +7885,13 @@ skip_interest:
 
       /* Copy tail */
       memcpy(ex_tmp + i + extras[j].len, out_buf + i, len - i);
+      init_mutation_vertical();
 
       if (common_fuzz_stuff(argv, ex_tmp, len + extras[j].len)) {
         ck_free(ex_tmp);
         goto abandon_entry;
       }
+      log_single_mutator_selection(13, (double)i / (double)len);
 
       stage_cur++;
 
@@ -7888,9 +7943,11 @@ skip_user_extras:
 
       last_len = a_extras[j].len;
       memcpy(out_buf + i, a_extras[j].data, last_len);
+      init_mutation_vertical();
 
       if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
+      log_single_mutator_selection(14, (double)i / (double)len);
       stage_cur++;
 
     }
