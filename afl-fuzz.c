@@ -3877,6 +3877,19 @@ static u32 hash_file(u8 *filename) {
 
 }
 
+static u8 check_last_location(u32 location) {
+  if (ignore_crash_loc)
+    return 1;
+  for (u32 i = 0; i < DFG_MAP_SIZE; i++)
+  {
+    if (dfg_targets[i] > MAP_SIZE) return 0;
+    else if (dfg_targets[i] == *last_location) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *covexe = "";
   u8 *covdir = "";
@@ -4358,7 +4371,7 @@ static void perform_dry_run(char** argv, char *base_crash_seed) {
 
         if (q == queue) check_map_coverage();
 
-        if (check_coverage(0, argv, use_mem, q->len)) {
+        if (check_covered_target()) {
 
           if (dfg_node_info_map) {
             check_unique_path();
@@ -4411,25 +4424,25 @@ static void perform_dry_run(char** argv, char *base_crash_seed) {
 
       case FAULT_CRASH:
         has_crashing_seed = 1;
-
         if (check_covered_target()) {
-          for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
-            if (dfg_targets[i] > MAP_SIZE) {
-              dfg_targets[i] = *last_location;
-              break;
-            } else if (dfg_targets[i] == *last_location) {
-              break;
+          // Add to crash location only if base_crash_seed not provided
+          if (!base_crash_seed) {
+            for (u32 i = 0; i < DFG_MAP_SIZE; i++) {
+              if (dfg_targets[i] > MAP_SIZE) {
+                dfg_targets[i] = *last_location;
+                break;
+              } else if (dfg_targets[i] == *last_location) {
+                break;
+              }
             }
           }
-        }
-
-        if (check_coverage(1, argv, use_mem, q->len)) {
           if (dfg_node_info_map) {
             check_unique_path();
           }
+          u8 is_neg_val = check_last_location(*last_location);
           u32 val_hash;
-          val_result = get_valuation(1, argv, use_mem, q->len, checksum, &val_hash, &valuation_file);
-          save_valuation(1, val_result, checksum, val_hash, q, valuation_file);
+          val_result = get_valuation(is_neg_val, argv, use_mem, q->len, checksum, &val_hash, &valuation_file);
+          save_valuation(is_neg_val, val_result, checksum, val_hash, q, valuation_file);
         }
 
         if (crash_mode) break;
@@ -4784,8 +4797,12 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u32 val_hash = 0;
   u8 *valuation = NULL;
   u8 is_covered_target = 0;
+  u8 is_neg_val = fault == FAULT_CRASH;
   if (fault == FAULT_CRASH || fault == FAULT_NONE) {
     is_covered_target = check_coverage(fault == FAULT_CRASH, argv, mem, len);
+    if (is_neg_val) {
+      is_neg_val = check_last_location(*last_location);
+    }
   }
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
@@ -4866,8 +4883,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
       queue_last->dfg_cksum = get_dfg_checksum();
       queue_last->last_location = *last_location;
-      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u] [val-hash %u] [stf %d]\n",
-           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location, val_hash, save_to_file);
+      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u] [val-hash %u] [stf %d] [neg %d]\n",
+           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location, val_hash, save_to_file, is_neg_val);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
@@ -4958,7 +4975,7 @@ keep_as_crash:
 
       if (!is_covered_target) return keeping;
       // save_to_file = get_valuation(1, argv, mem, len, dfg_checksum, new_seed, &val_hash);
-      save_valuation(1, save_to_file, dfg_checksum, val_hash, new_seed, valuation);
+      save_valuation(is_neg_val, save_to_file, dfg_checksum, val_hash, new_seed, valuation);
 
       /* This is handled in a manner roughly similar to timeouts,
          except for slightly different limits and no need to re-run test
