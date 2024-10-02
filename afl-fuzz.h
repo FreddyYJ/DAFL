@@ -88,8 +88,6 @@ struct queue_entry {
   u32 tc_ref;                         /* Trace bytes ref count            */
 
   struct queue_entry *next;           /* Next element, if any             */
-  struct queue_entry *next_moo;       /* Next element in the MOO queue    */
-  struct queue_entry *prev_moo;       /* Prev element in MOO queue */
 
   struct pareto_info moo_info;        /* Pareto info for MOO mode */
   struct pareto_info explore_info;   /* Pareto info for explore mode */
@@ -230,33 +228,6 @@ struct queue_entry * vector_pop_front(struct vector *vec) {
 void vector_free(struct vector* vec) {
   ck_free(vec->data);
   ck_free(vec);
-}
-
-struct vector *list_to_vector(struct queue_entry *list) {
-  struct vector *vec = vector_create();
-  struct queue_entry *q = list;
-  while (q != NULL) {
-    push_back(vec, q);
-    q = q->next_moo;
-  }
-  return vec;
-}
-
-struct queue_entry *vector_to_list(struct vector *vec) {
-  struct queue_entry *list = NULL;
-  struct queue_entry *prev = NULL;
-  for (u32 i = 0; i < vec->size; i++) {
-    // Construct the list, skip the NULL entries
-    struct queue_entry *entry = vec->data[i];
-    if (entry) {
-      entry->prev_moo = prev;
-      entry->next_moo = NULL;
-      if (prev) prev->next_moo = entry;
-      prev = entry;
-      if (!list) list = entry;
-    }
-  }
-  return list;
 }
 
 struct queue_entry* vector_get(struct vector* vec, u32 index) {

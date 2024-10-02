@@ -2052,89 +2052,6 @@ void update_dfg_score_moo() {
           min_prox_score.adjusted, max_prox_score.adjusted, avg_prox_score.adjusted, total_prox_score.adjusted);
 }
 
-static void update_dfg_score(struct queue_entry *q_preserve) {
-  /**
-   * Recalculate score of input entries based on dfg_count_map
-   * Sort the queue based on the new score
-   * TODO: use better sorting algorithm
-   * Update [min|max|total|avg]_prox_score
-   * Keep the queue size under the limit
-  */
-  if (use_moo_scheduler) {
-    return;
-  }
-  u64 start_time = get_cur_time();
-  init_global_prox_score();
-  memset(shortcut_per_100, 0, 1024 * sizeof(struct queue_entry*));
-  struct queue_entry *q_cur = queue, *q_next;
-  queue = NULL;
-  u32 avg_covered = 0;
-
-  while (q_cur) {
-
-    q_next = q_cur->next;
-    q_cur->next = NULL; // To satisfy sorted_insert_to_queue()'s assumption
-    avg_covered += q_cur->prox_score.covered;
-    recompute_proximity_score(q_cur);
-    sorted_insert_to_queue(q_cur);
-    update_global_prox_score(&q_cur->prox_score);
-    q_cur = q_next;
-
-  }
-
-  // Remove the last entry if the queue size exceeds the limit
-  if (queued_paths_cur > max_queue_size) {
-    u32 idx = max_queue_size;
-    u32 idx_div = idx / 100;
-    idx -= idx_div * 100;
-    struct queue_entry *q = shortcut_per_100[idx_div];
-    while (idx--) {
-      q = q->next;
-    }
-    struct queue_entry *q_last = q;
-    struct queue_entry *q_remove = q_last->next, *q_next;
-    q_last->next = NULL;
-    u32 revert_remove = 0;
-    while (q_remove) {
-      q_next = q_remove->next;
-      if (q_remove != q_preserve) {
-        if (q_remove == first_unhandled)
-          first_unhandled = NULL;
-        total_prox_score.original -= q_remove->prox_score.original;
-        total_prox_score.adjusted -= q_remove->prox_score.adjusted;
-        destroy_queue_entry(q_remove, 1);
-        // Should we reduce the count of the dfg_count_map?
-        // Remove entry from queue
-        LOGF("[q] [rm] [q %u] [id %u] [orig %llu] [adj %f] [cov %u]\n",
-                queued_paths, q_remove->entry_id, q_remove->prox_score.original, q_remove->prox_score.adjusted, q_remove->prox_score.covered);
-      } else {
-        revert_remove = 1;
-      }
-      q_remove = q_next;
-    }
-    queued_paths_cur = max_queue_size + revert_remove;
-    if (revert_remove) {
-      q_last->next = q_preserve;
-      q_preserve->next = NULL;
-    }
-    min_prox_score.original = q->prox_score.original;
-    min_prox_score.adjusted = q->prox_score.adjusted;
-  }
-  
-  avg_prox_score.original = total_prox_score.original / queued_paths_cur;
-  avg_prox_score.adjusted = total_prox_score.adjusted / queued_paths_cur;
-  avg_covered = avg_covered / queued_paths_cur;
-  u64 end_time = get_cur_time();
-
-  LOGF( "[stat] [queue] [id %u] [cur %u] [avg_cov %u] [time %llu]\n",
-          queued_paths, queued_paths_cur, avg_covered, end_time - start_time);
-  LOGF( "[stat] [orig] [id %u] [min %llu] [max %llu] [avg %llu] [total %llu]\n",
-          queued_paths, min_prox_score.original, max_prox_score.original, avg_prox_score.original, total_prox_score.original);
-  LOGF( "[stat] [adj] [id %u] [min %f] [max %f] [avg %f] [total %f]\n",
-          queued_paths, min_prox_score.adjusted, max_prox_score.adjusted, avg_prox_score.adjusted, total_prox_score.adjusted);
-
-}
-
 /* Destructively simplify trace by eliminating hit count information
    and replacing it with 0x80 or 0x01 depending on whether the tuple
    is hit or not. Called on every new crash or timeout, should be
@@ -2502,9 +2419,7 @@ enum VerticalMode vertical_manager_get_mode(struct vertical_manager *manager) {
 }
 
 static struct queue_entry* select_next_entry_dafl() {
-  struct queue_entry* q = NULL;
-  update_dfg_score(queue_last);
-  q = queue_cur;
+  struct queue_entry* q = queue_cur;
   if (first_unhandled) { // This is set only when a new item was added.
     q = first_unhandled;
     first_unhandled = NULL;
