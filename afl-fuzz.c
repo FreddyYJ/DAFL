@@ -334,6 +334,9 @@ static struct proximity_score avg_prox_score; /* Average of proximity scores    
 u64 total_prox_original = 0;
 u64 total_prox_cnt = 0;
 
+u8 use_old_dafl_seed_pool_add = 0;
+u8 use_old_dafl_coverage = 0;
+
 static struct hashmap *dfg_hashmap;     /* Hashmap for DFG coverage         */
 
 static struct hashmap *unique_mem_hashmap; /* Hashmap for unique memory valuation */
@@ -3813,6 +3816,9 @@ static u8 check_coverage(u8 crashed, char** argv, void* mem, u32 len) {
   u8 *cmd = "";
   u8 covered[100] = "";
   u8 *tmp_argv1 = "";
+  if (use_old_dafl_coverage) {
+    return check_covered_target();
+  }
 
   u8 coverage_result = check_covered_target();
   if (!crashed) return coverage_result;
@@ -4756,6 +4762,11 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     case ADD_QUEUE_ALL:  is_interesting = (hnb || vertical_is_new_valuation); break;
     case ADD_QUEUE_NONE:  is_interesting = 0; break;
     default: is_interesting = hnb; break;
+    }
+    if (use_old_dafl_seed_pool_add) {
+      if (crash_mode != fault) {
+        is_interesting = 0;
+      }
     }
     if (is_interesting) {
 
@@ -11432,7 +11443,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:UX:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:UX:D:")) > 0)
 
     switch (opt) {
 
@@ -11724,6 +11735,22 @@ int main(int argc, char** argv) {
         scheduler_select_ratio = atof(value_str);
       }
       break;
+    }
+
+    case 'D': {
+      // Original DAFL mode
+      // 1. Use original seed pool add (seed pool)
+      if (optarg[0] == 'o') {
+        use_old_dafl_seed_pool_add = 1;
+      } else {
+        use_old_dafl_seed_pool_add = 0;
+      }
+      // 2. Coverage check (save generated input)
+      if (optarg[1] == 'o') {
+        use_old_dafl_coverage = 1;
+      } else {
+        use_old_dafl_coverage = 0;
+      }
     }
 
     default:
