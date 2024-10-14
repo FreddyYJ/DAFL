@@ -11751,6 +11751,7 @@ int main(int argc, char** argv) {
       } else {
         use_old_dafl_coverage = 0;
       }
+      break;
     }
 
     default:
