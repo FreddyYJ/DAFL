@@ -6718,6 +6718,8 @@ void log_single_mutator_selection(u32 mutator, double location) {
 
 void log_mutator_selection(u32* mutator, double* location, u32 stacking) {
   // 4 * vertical_is_interesting
+  if (!use_moo_scheduler && !use_vertical_navigation && !vertical_experiment && !vertical_use_dynamic)
+    return;
   u32 score = vertical_is_persistent + 16 * vertical_is_new_valuation;
   u32 mut_cnt[OPERATOR_NUM];
   memset(mut_cnt, 0, sizeof(mut_cnt));
@@ -7188,7 +7190,7 @@ static u8 fuzz_one_vertical(char** argv) {
 
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
-    log_single_mutator_selection(4, (double)i / (double)stage_max);
+    log_single_mutator_selection(4, (double)i / (double)(len - 1));
     stage_cur++;
 
     *(u16*)(out_buf + i) ^= 0xFFFF;
@@ -7227,7 +7229,7 @@ static u8 fuzz_one_vertical(char** argv) {
     init_mutation_vertical();
 
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
-    log_single_mutator_selection(5, (double)i / (double)stage_max);
+    log_single_mutator_selection(5, (double)i / (double)(len - 3));
     stage_cur++;
 
     *(u32*)(out_buf + i) ^= 0xFFFFFFFF;
