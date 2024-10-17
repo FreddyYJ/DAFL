@@ -6696,7 +6696,8 @@ u32 convert_to_actual_location(u32 max, u32 sel) {
   // Select +- min_error location
   u32 minus = min_error;
   u32 plus = UR(2 * min_error + 1);
-  if (loc_u32 < min_error) minus = loc_u32 - 1;
+  if (loc_u32 == 0) minus = 0;
+  else if (loc_u32 < min_error) minus = loc_u32 - 1;
   u32 loc_final = loc_u32 - minus + plus;
   if (loc_final > max - 1) loc_final = max - 1;
   return loc_final;
