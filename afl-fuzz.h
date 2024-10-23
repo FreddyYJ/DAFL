@@ -32,6 +32,7 @@ enum AddQueueMode {
   ADD_QUEUE_UNIQUE_VAL_PER_PATH = 2,
   ADD_QUEUE_ALL = 3, // unique_val_per_path + default
   ADD_QUEUE_NONE = 4,
+  ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER = 5,
 };
 
 enum ParetoStatus {

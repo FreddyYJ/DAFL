@@ -4761,7 +4761,16 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     case ADD_QUEUE_UNIQUE_VAL:  is_interesting = save_to_file; break;
     case ADD_QUEUE_ALL:  is_interesting = (hnb || vertical_is_new_valuation); break;
     case ADD_QUEUE_NONE:  is_interesting = 0; break;
-    default: is_interesting = hnb; break;
+    case ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER:  {
+      if (stride_scheduler_get_mode(stride_scheduler) == M_VER)
+        is_interesting = (vertical_is_new_valuation);
+      else
+        is_interesting = (hnb);
+      break;
+    }
+    default:
+      is_interesting = hnb;
+      break;
     }
     if (use_old_dafl_seed_pool_add) {
       if (crash_mode != fault) {
@@ -11712,6 +11721,8 @@ int main(int argc, char** argv) {
         case 'n':
           add_queue_mode = ADD_QUEUE_NONE;
           break;
+        case 'x':
+          add_queue_mode = ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER;
         default:
           FATAL("Unsupported suffix or bad syntax for -q");
       }
