@@ -1169,12 +1169,13 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
 }
 
 void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
-  if (!q) return;
-  push_back(entry->entries, q);
+  if (q) push_back(entry->entries, q);
   if (vertical_manager_select_smallest_paths) {
-    vertical_entry_sorted_insert(manager, entry, 1);
+    // Insert the entry to the sorted list only if it found new valuation
+    if (!kvp) vertical_entry_sorted_insert(manager, entry, 1);
     return;
   }
+  if (!q) return;
   if (vector_size(entry->entries) == 0) {
     entry->next = manager->head;
     manager->head = entry;
@@ -2459,7 +2460,7 @@ struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *ma
       entry = entry->next;
     }
     vertical_entry_sorted_insert(manager, entry, 0);
-    LOGF("[vert-entry] [sel] [selected %u] [vals %u] [entries %u]\n", entry ? entry->hash : -1, entry ? hashmap_size(entry->value_map) : 0, entry ? vector_size(entry->entries) : 0);
+    LOGF("[vert-entry] [sel] [selected %u] [vals %u] [entries %u]\n", entry ? entry->hash : -1, entry ? hashmap_size(entry->value_map) : 0, entry ? vector_size(entry->entries) + vector_size(entry->old_entries) : 0);
     return entry;
   }
   if (entry) {
@@ -4028,9 +4029,9 @@ static void save_valuation(u8 crashed, u8 is_unique, u32 dfg_cksum, u32 hash, st
     struct hashmap *local_valuation_hashmap = local_entry->value_map;
     struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
     if (no_unique_val) {
-      vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
       if (!local_valuation_kvp)
         hashmap_insert(local_valuation_hashmap, hash, q);
+      vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
     } else {
       if (local_valuation_kvp) {
         if (q && !local_valuation_kvp->value) {
