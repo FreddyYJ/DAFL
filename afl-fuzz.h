@@ -33,6 +33,7 @@ enum AddQueueMode {
   ADD_QUEUE_ALL = 3, // unique_val_per_path + default
   ADD_QUEUE_NONE = 4,
   ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER = 5,
+  ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER_PLUS_DEF = 6,
 };
 
 enum ParetoStatus {
@@ -494,7 +495,7 @@ struct vertical_manager {
 
 struct vertical_entry *vertical_entry_create(u32 hash);
 
-void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry);
+void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry, u8 update);
 
 void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp);
 

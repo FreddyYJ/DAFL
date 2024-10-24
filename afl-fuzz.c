@@ -1112,13 +1112,14 @@ struct vertical_entry *vertical_entry_create(u32 hash) {
   return entry;
 }
 
-void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry) {
+void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry, u8 update) {
   if (entry == NULL)
     return;
   struct vertical_entry *cur = manager->head;
+  if (update)
+    LOGF("[vert-entry] [insert] [entry %u] [vals %u] [entries %u]\n", entry->hash, hashmap_size(entry->value_map), vector_size(entry->entries) + vector_size(entry->old_entries));
   if (!cur) {
     manager->head = entry;
-    LOGF("[vert-entry] [insert] [entry %u] [size %u] [old %u] [new %u]\n", entry->hash, hashmap_size(entry->value_map), 0, 0);
     return;
   }
   if (cur == entry) {
@@ -1131,12 +1132,9 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
     // Insert at the head
     entry->next = cur;
     manager->head = entry;
-    LOGF("[vert-entry] [insert] [entry %u] [size %u] [old %u] [new %u]\n", entry->hash, hashmap_size(entry->value_map), 0, 0);
     return;
   }
   // First, remove the entry from the list
-  u32 original_index = 0;
-  u32 new_index = 0;
   while (cur) {
     if (cur->next == entry) {
       cur->next = entry->next;
@@ -1144,9 +1142,7 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
       break;
     }
     cur = cur->next;
-    original_index++;
   }
-  new_index = original_index;
   // Then, insert the entry to the list
   // Since size does not decrease, 
   // we can start from the last location
@@ -1169,18 +1165,14 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
       break;
     }
     cur = cur->next;
-    new_index++;
   }
-  LOGF("[vert-entry] [insert] [entry %u] [size %u] [old %u] [new %u]\n", entry->hash, hashmap_size(entry->value_map), original_index, new_index + 1);
 }
 
 void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
   if (!q) return;
   push_back(entry->entries, q);
   if (vertical_manager_select_smallest_paths) {
-    if (!kvp) { // insert only if new valuation is found
-      vertical_entry_sorted_insert(manager, entry);
-    }
+    vertical_entry_sorted_insert(manager, entry, 1);
     return;
   }
   if (vector_size(entry->entries) == 0) {
@@ -2466,8 +2458,8 @@ struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *ma
     while (entry && hashmap_size(entry->value_map) == 0) {
       entry = entry->next;
     }
-    vertical_entry_sorted_insert(manager, entry);
-    LOGF("[vert-entry] [sel] [selected %u] [size %u]\n", entry ? entry->hash : -1, entry ? hashmap_size(entry->value_map) : 0);
+    vertical_entry_sorted_insert(manager, entry, 0);
+    LOGF("[vert-entry] [sel] [selected %u] [vals %u] [entries %u]\n", entry ? entry->hash : -1, entry ? hashmap_size(entry->value_map) : 0, entry ? vector_size(entry->entries) : 0);
     return entry;
   }
   if (entry) {
@@ -4863,6 +4855,13 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     case ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER:  {
       if (stride_scheduler_get_mode(stride_scheduler) == M_VER)
         is_interesting = (vertical_is_new_valuation);
+      else
+        is_interesting = (hnb);
+      break;
+    }
+    case ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER_PLUS_DEF: {
+      if (stride_scheduler_get_mode(stride_scheduler) == M_VER)
+        is_interesting = (hnb || vertical_is_new_valuation);
       else
         is_interesting = (hnb);
       break;
@@ -11822,6 +11821,9 @@ int main(int argc, char** argv) {
           break;
         case 'x':
           add_queue_mode = ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER;
+        case 'y':
+          add_queue_mode = ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER_PLUS_DEF;
+          break;
         default:
           FATAL("Unsupported suffix or bad syntax for -q");
       }
@@ -11866,7 +11868,7 @@ int main(int argc, char** argv) {
     }
 
     case 'A':
-      vertical_manager_select_smallest_paths = 1;
+      vertical_manager_select_smallest_paths = 0;
       break;
 
     default:
