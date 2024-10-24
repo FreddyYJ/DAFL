@@ -1114,8 +1114,22 @@ struct vertical_entry *vertical_entry_create(u32 hash) {
 }
 
 void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry) {
+  if (entry == NULL)
+    return;
   struct vertical_entry *cur = manager->head;
   if (!cur) {
+    manager->head = entry;
+    return;
+  }
+  if (cur == entry) {
+    if (cur->next == NULL) return; // Only 1 entry in list
+    manager->head = cur->next;
+    cur->next = NULL;
+  }
+  cur = manager->head;
+  if (entry->size < cur->size) {
+    // Insert at the head
+    entry->next = cur;
     manager->head = entry;
     return;
   }
@@ -1128,13 +1142,24 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
     cur = cur->next;
   }
   // Then, insert the entry to the list
-  // We can start from the last location unless it's new
+  // Since size does not decrease, 
+  // we can start from the last location
   if (!cur) cur = manager->head;
   while (cur) {
-    if (cur->next == NULL || cur->next->size > entry->size) {
+    if (cur->next == NULL) {
+      if (entry->size >= cur->size) {
+        cur->next = entry;
+        entry->next = NULL;
+      } else {
+        // Insert at the head: already handled...
+        entry->next = cur;
+        manager->head = entry;
+      }
+      break;
+    } else if (entry->size > cur->next->size) {
       entry->next = cur->next;
       cur->next = entry;
-      return;
+      break;
     }
     cur = cur->next;
   }
@@ -1152,7 +1177,6 @@ void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry 
     entry->next = manager->head;
     manager->head = entry;
   }
-  return;
 }
 
 struct vertical_manager *vertical_manager_create() {
