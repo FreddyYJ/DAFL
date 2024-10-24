@@ -183,6 +183,8 @@ EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
 EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
 EXP_ST u32 dfg_targets[DFG_MAP_SIZE];
 
+EXP_ST u8 trace_bits_tmp[MAP_SIZE];
+
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
            virgin_crash[MAP_SIZE];    /* Bits we haven't seen in crashes  */
@@ -1173,7 +1175,7 @@ void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry 
   if (vertical_manager_select_smallest_paths) {
     // Insert the entry to the sorted list only if it found new valuation
     u32 size = vector_size(entry->entries) + vector_size(entry->old_entries);
-    if ((!kvp && size > 0) || size == 1) vertical_entry_sorted_insert(manager, entry, 1);
+    if ((!kvp && size > 0) || (size == 1 && q)) vertical_entry_sorted_insert(manager, entry, 1);
     return;
   }
   if (!q) return;
@@ -4046,7 +4048,7 @@ static void save_valuation(u8 crashed, u8 is_unique, u32 dfg_cksum, u32 hash, st
       }
     }
   } else {
-    SAYF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
+    LOGF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
   }
 }
 
@@ -4801,8 +4803,9 @@ static void write_crash_readme(void) {
 static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   u8  *fn = "";
-  u8  hnb;
+  u8  hnb = 0;
   u8  is_interesting = 0;
+  u32 exec_cksum = 0;
   s32 fd;
   u8  keeping = 0, res;
   u8 has_valid_unique_path = 0;
@@ -4813,10 +4816,15 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8 is_covered_target = 0;
   u8 is_neg_val = fault == FAULT_CRASH;
   if (fault == FAULT_CRASH || fault == FAULT_NONE) {
+    if (!use_old_dafl_seed_pool_add || crash_mode == fault) {
+      memcpy(trace_bits_tmp, trace_bits, MAP_SIZE);
+      hnb = has_new_bits(virgin_bits);
+    }
     is_covered_target = check_coverage(fault == FAULT_CRASH, argv, mem, len);
     if (is_neg_val) {
       is_neg_val = check_last_location(*last_location);
     }
+    LOGF("[test] [hnb %u] [exec_cksum %u] [dfg-path %u] [target %u] [last-loc %u]\n", hnb, exec_cksum, get_dfg_checksum(), is_covered_target, *last_location);
   }
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
@@ -4846,8 +4854,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   }
   //  || (use_moo_scheduler && has_valid_unique_path)
   if ((fault == FAULT_CRASH) || (fault == FAULT_NONE)) {
-
-    hnb = has_new_bits(virgin_bits);
+    // hnb = has_new_bits(virgin_bits);
     switch (add_queue_mode) {
     case ADD_QUEUE_DEFAULT:  is_interesting = hnb; break;
     case ADD_QUEUE_UNIQUE_VAL_PER_PATH: is_interesting = vertical_is_new_valuation; break;
@@ -4872,20 +4879,17 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       is_interesting = hnb;
       break;
     }
+
     if (use_old_dafl_seed_pool_add) {
       if (crash_mode != fault) {
         is_interesting = 0;
       }
     }
+
     if (is_interesting) {
 
     /* Keep only if there are new bits in the map, add to queue for
        future fuzzing, etc. */
-
-    // if (!(hnb = has_new_bits(virgin_bits))) {
-    //   if (crash_mode) total_crashes++;
-    //   return 0;
-    // }
       compute_proximity_score(&prox_score, dfg_bits, 0);
       vertical_is_interesting = 1;
       if (has_valid_unique_path) {
@@ -4915,11 +4919,11 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
         queued_with_cov++;
       }
 
-      queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
-      queue_last->dfg_cksum = get_dfg_checksum();
+      queue_last->exec_cksum = hash32(trace_bits_tmp, MAP_SIZE, HASH_CONST);
+      queue_last->dfg_cksum = dfg_checksum;
       queue_last->last_location = *last_location;
-      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u] [val-hash %u] [stf %d] [neg %d]\n",
-           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location, val_hash, save_to_file, is_neg_val);
+      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u] [val-hash %u] [stf %d] [neg %d] [exec %u]\n",
+           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location, val_hash, save_to_file, is_neg_val, queue_last->exec_cksum);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
