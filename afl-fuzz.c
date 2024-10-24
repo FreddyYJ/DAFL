@@ -1117,18 +1117,17 @@ struct vertical_entry *vertical_entry_create(u32 hash) {
 void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry, u8 update) {
   if (entry == NULL)
     return;
-  struct vertical_entry *cur = manager->head;
   if (update)
     LOGF("[vert-entry] [insert] [entry %u] [vals %u] [entries %u]\n", entry->hash, hashmap_size(entry->value_map), vector_size(entry->entries) + vector_size(entry->old_entries));
+  struct vertical_entry *cur = manager->head;
   if (!cur) {
     manager->head = entry;
+    entry->next = NULL;
     return;
   }
-  if (cur == entry) {
-    if (cur->next == NULL) return; // Only 1 entry in list
-    manager->head = cur->next;
-    cur->next = NULL;
-  }
+  // Only 1 entry in list
+  if (manager->head == entry && entry->next == NULL) return;
+  
   cur = manager->head;
   if (hashmap_size(entry->value_map) < hashmap_size(cur->value_map)) {
     // Insert at the head
@@ -1137,28 +1136,34 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
     return;
   }
   // First, remove the entry from the list
+  u32 count = 0;
+  struct vertical_entry *prev = NULL;
   while (cur) {
-    if (cur->next == entry) {
-      cur->next = entry->next;
+    if (cur == entry) {
+      if (prev) {
+        prev->next = cur->next;
+      } else {
+        manager->head = cur->next;
+      }
       entry->next = NULL;
       break;
     }
+    prev = cur;
     cur = cur->next;
+    count++;
   }
   // Then, insert the entry to the list
   // Since size does not decrease, 
   // we can start from the last location
-  if (!cur) cur = manager->head;
+  prev = NULL;
+  cur = manager->head;
   while (cur) {
     if (cur->next == NULL) {
-      if (hashmap_size(entry->value_map) >= hashmap_size(cur->value_map)) {
-        // Insert at the end
-        cur->next = entry;
-        entry->next = NULL;
-      } else {
-        // Insert at the head: already handled...
-        entry->next = cur;
-        manager->head = entry;
+      // Insert at the end
+      cur->next = entry;
+      entry->next = NULL;
+      if (hashmap_size(entry->value_map) < hashmap_size(cur->value_map)) {
+        LOGF("[error] [vert-entry] [insert] [error] [entry %u] [vals %u] [entries %u] [cur %u] [cur-vals %u] [cur-entries %u]\n", entry->hash, hashmap_size(entry->value_map), vector_size(entry->entries) + vector_size(entry->old_entries), cur->hash, hashmap_size(cur->value_map), vector_size(cur->entries) + vector_size(cur->old_entries));
       }
       break;
     } else if (hashmap_size(entry->value_map) < hashmap_size(cur->next->value_map)) {
@@ -1166,6 +1171,7 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
       cur->next = entry;
       break;
     }
+    prev = cur;
     cur = cur->next;
   }
 }
@@ -2459,9 +2465,11 @@ struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *ma
   struct vertical_entry *entry = manager->head;
   if (vertical_manager_select_smallest_paths) {
     // Do not move the entry to the old queue...
-    while (entry && hashmap_size(entry->value_map) == 0) {
-      entry = entry->next;
-    }
+    // while (entry && hashmap_size(entry->value_map) == 0) {
+    //   entry = entry->next;
+    // }
+    manager->head = entry->next;
+    entry->next = NULL;
     vertical_entry_sorted_insert(manager, entry, 0);
     LOGF("[vert-entry] [sel] [selected %u] [vals %u] [entries %u]\n", entry ? entry->hash : -1, entry ? hashmap_size(entry->value_map) : 0, entry ? vector_size(entry->entries) + vector_size(entry->old_entries) : 0);
     return entry;
@@ -2546,7 +2554,11 @@ static struct queue_entry* select_next_entry_vertical() {
   }
   q = vector_pop_back(entry->entries);
   // push back to the old queue
-  vertical_manager_insert_to_old(vertical_manager, entry, q);
+  if (vertical_manager_select_smallest_paths) {
+    push_back(entry->old_entries, q);
+  } else {
+    vertical_manager_insert_to_old(vertical_manager, entry, q);
+  }
   LOGF("[sel] [vertical] [id %d] [dfg-path %u] [time %llu]\n", q ? q->entry_id : -1, entry->hash, get_cur_time() - start_time);
   return q;
 }
@@ -2588,6 +2600,11 @@ static struct queue_entry* select_next_entry() {
   // Use the default dafl scheduler
   if (!use_moo_scheduler) {
     return select_next_entry_dafl();
+  }
+
+  if (use_vertical_navigation) {
+    selected_entry = select_next_entry_vertical();
+    if (selected_entry) return selected_entry;
   }
 
   // Determine whether to use the vertical navigation
@@ -4824,7 +4841,6 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     if (is_neg_val) {
       is_neg_val = check_last_location(*last_location);
     }
-    LOGF("[test] [hnb %u] [exec_cksum %u] [dfg-path %u] [target %u] [last-loc %u]\n", hnb, exec_cksum, get_dfg_checksum(), is_covered_target, *last_location);
   }
   struct queue_entry *new_seed = NULL;
   struct proximity_score prox_score;
