@@ -1105,7 +1105,6 @@ struct vertical_entry *vertical_entry_create(u32 hash) {
   struct vertical_entry *entry = ck_alloc(sizeof(struct vertical_entry));
   entry->hash = hash;
   entry->use_count = 0;
-  entry->size = 0;
   entry->entries = vector_create();
   entry->old_entries = vector_create();
   entry->next = NULL;
@@ -1119,6 +1118,7 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
   struct vertical_entry *cur = manager->head;
   if (!cur) {
     manager->head = entry;
+    LOGF("[vert-entry] [insert] [entry %u] [size %u] [old %u] [new %u]\n", entry->hash, hashmap_size(entry->value_map), 0, 0);
     return;
   }
   if (cur == entry) {
@@ -1127,10 +1127,11 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
     cur->next = NULL;
   }
   cur = manager->head;
-  if (entry->size < cur->size) {
+  if (hashmap_size(entry->value_map) < hashmap_size(cur->value_map)) {
     // Insert at the head
     entry->next = cur;
     manager->head = entry;
+    LOGF("[vert-entry] [insert] [entry %u] [size %u] [old %u] [new %u]\n", entry->hash, hashmap_size(entry->value_map), 0, 0);
     return;
   }
   // First, remove the entry from the list
@@ -1139,6 +1140,7 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
   while (cur) {
     if (cur->next == entry) {
       cur->next = entry->next;
+      entry->next = NULL;
       break;
     }
     cur = cur->next;
@@ -1151,7 +1153,8 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
   if (!cur) cur = manager->head;
   while (cur) {
     if (cur->next == NULL) {
-      if (entry->size >= cur->size) {
+      if (hashmap_size(entry->value_map) >= hashmap_size(cur->value_map)) {
+        // Insert at the end
         cur->next = entry;
         entry->next = NULL;
       } else {
@@ -1160,7 +1163,7 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
         manager->head = entry;
       }
       break;
-    } else if (entry->size > cur->next->size) {
+    } else if (hashmap_size(entry->value_map) < hashmap_size(cur->next->value_map)) {
       entry->next = cur->next;
       cur->next = entry;
       break;
@@ -1168,15 +1171,16 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
     cur = cur->next;
     new_index++;
   }
-  LOGF("[vert-entry] [insert] [entry %u] [old %u] [new %u]\n", entry->hash, original_index, new_index);
+  LOGF("[vert-entry] [insert] [entry %u] [size %u] [old %u] [new %u]\n", entry->hash, hashmap_size(entry->value_map), original_index, new_index + 1);
 }
 
 void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
   if (!q) return;
-  entry->size++;
   push_back(entry->entries, q);
   if (vertical_manager_select_smallest_paths) {
-    vertical_entry_sorted_insert(manager, entry);
+    if (!kvp) { // insert only if new valuation is found
+      vertical_entry_sorted_insert(manager, entry);
+    }
     return;
   }
   if (vector_size(entry->entries) == 0) {
@@ -2459,11 +2463,11 @@ struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *ma
   struct vertical_entry *entry = manager->head;
   if (vertical_manager_select_smallest_paths) {
     // Do not move the entry to the old queue...
-    while (entry && entry->size == 0) {
+    while (entry && hashmap_size(entry->value_map) == 0) {
       entry = entry->next;
     }
     vertical_entry_sorted_insert(manager, entry);
-    LOGF("[vert-entry] [sel] [selected %u] [size %u]\n", entry ? entry->hash : -1, entry ? entry->size : 0);
+    LOGF("[vert-entry] [sel] [selected %u] [size %u]\n", entry ? entry->hash : -1, entry ? hashmap_size(entry->value_map) : 0);
     return entry;
   }
   if (entry) {

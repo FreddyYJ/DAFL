@@ -475,7 +475,6 @@ u32 stride_scheduler_update_found_count(struct stride_scheduler *stride, u32 fou
 struct vertical_entry {
   u32 hash;                   // dfg path hash
   u32 use_count;
-  u32 size;
   struct vector *entries;
   struct vector *old_entries;
   struct vertical_entry *next;
