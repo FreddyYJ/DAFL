@@ -109,6 +109,8 @@ static u8 vertical_is_new_valuation = 0;
 static u8 vertical_use_dynamic = 0;
 static u8 vertical_experiment = 0;
 
+static u8 vertical_manager_select_smallest_paths = 1;
+
 static u64 explore_time = 15 * 60 * 1000; // 15 minutes
 static u64 use_explore = 0;
 static enum AddQueueMode add_queue_mode = ADD_QUEUE_DEFAULT;
@@ -180,6 +182,8 @@ EXP_ST u64 dfg_node_count[DFG_MAP_SIZE];  /* Node counts for DFG              */
 EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
 EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
 EXP_ST u32 dfg_targets[DFG_MAP_SIZE];
+
+EXP_ST u8 trace_bits_tmp[MAP_SIZE];
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -1008,7 +1012,7 @@ double interval_tree_query(struct interval_tree *tree, struct interval_node *nod
 double interval_node_ratio(struct interval_node *node) {
   if (!node) return 0.0;
   if (node->count == 0) return 0.0;
-  return (double)(node->score) / (double)(node->count);
+  return (double)(node->score); //  / (double)(node->count)
 }
 
 u8 should_split(double a, double b) {
@@ -1098,6 +1102,94 @@ u32 interval_tree_select(struct interval_tree *tree) {
   return interval_node_select(tree->root);
 }
 // End of interval tree
+
+struct vertical_entry *vertical_entry_create(u32 hash) {
+  struct vertical_entry *entry = ck_alloc(sizeof(struct vertical_entry));
+  entry->hash = hash;
+  entry->use_count = 0;
+  entry->entries = vector_create();
+  entry->old_entries = vector_create();
+  entry->next = NULL;
+  entry->value_map = hashmap_create(8);
+  return entry;
+}
+
+void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry, u8 update) {
+  if (entry == NULL)
+    return;
+  if (update)
+    LOGF("[vert-entry] [insert] [entry %u] [vals %u] [entries %u]\n", entry->hash, hashmap_size(entry->value_map), vector_size(entry->entries) + vector_size(entry->old_entries));
+  struct vertical_entry *cur = manager->head;
+  if (!cur) {
+    manager->head = entry;
+    entry->next = NULL;
+    return;
+  }
+  // Only 1 entry in list
+  if (manager->head == entry && entry->next == NULL) return;
+  
+  cur = manager->head;
+  if (hashmap_size(entry->value_map) < hashmap_size(cur->value_map)) {
+    // Insert at the head
+    entry->next = cur;
+    manager->head = entry;
+    return;
+  }
+  // First, remove the entry from the list
+  u32 count = 0;
+  struct vertical_entry *prev = NULL;
+  while (cur) {
+    if (cur == entry) {
+      if (prev) {
+        prev->next = cur->next;
+      } else {
+        manager->head = cur->next;
+      }
+      entry->next = NULL;
+      break;
+    }
+    prev = cur;
+    cur = cur->next;
+    count++;
+  }
+  // Then, insert the entry to the list
+  // Since size does not decrease, 
+  // we can start from the last location
+  prev = NULL;
+  cur = manager->head;
+  while (cur) {
+    if (cur->next == NULL) {
+      // Insert at the end
+      cur->next = entry;
+      entry->next = NULL;
+      if (hashmap_size(entry->value_map) < hashmap_size(cur->value_map)) {
+        LOGF("[error] [vert-entry] [insert] [error] [entry %u] [vals %u] [entries %u] [cur %u] [cur-vals %u] [cur-entries %u]\n", entry->hash, hashmap_size(entry->value_map), vector_size(entry->entries) + vector_size(entry->old_entries), cur->hash, hashmap_size(cur->value_map), vector_size(cur->entries) + vector_size(cur->old_entries));
+      }
+      break;
+    } else if (hashmap_size(entry->value_map) < hashmap_size(cur->next->value_map)) {
+      entry->next = cur->next;
+      cur->next = entry;
+      break;
+    }
+    prev = cur;
+    cur = cur->next;
+  }
+}
+
+void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
+  if (q) push_back(entry->entries, q);
+  if (vertical_manager_select_smallest_paths) {
+    // Insert the entry to the sorted list only if it found new valuation
+    u32 size = vector_size(entry->entries) + vector_size(entry->old_entries);
+    if ((!kvp && size > 0) || (size == 1 && q)) vertical_entry_sorted_insert(manager, entry, 1);
+    return;
+  }
+  if (!q) return;
+  if (vector_size(entry->entries) == 0) {
+    entry->next = manager->head;
+    manager->head = entry;
+  }
+}
 
 struct vertical_manager *vertical_manager_create() {
   struct vertical_manager *manager = ck_alloc(sizeof(struct vertical_manager));
@@ -2371,6 +2463,17 @@ struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *ma
   if (manager->head == NULL && manager->old == NULL) return NULL;
   // Pop from head
   struct vertical_entry *entry = manager->head;
+  if (vertical_manager_select_smallest_paths) {
+    // Do not move the entry to the old queue...
+    // while (entry && hashmap_size(entry->value_map) == 0) {
+    //   entry = entry->next;
+    // }
+    manager->head = entry->next;
+    entry->next = NULL;
+    vertical_entry_sorted_insert(manager, entry, 0);
+    LOGF("[vert-entry] [sel] [selected %u] [vals %u] [entries %u]\n", entry ? entry->hash : -1, entry ? hashmap_size(entry->value_map) : 0, entry ? vector_size(entry->entries) + vector_size(entry->old_entries) : 0);
+    return entry;
+  }
   if (entry) {
     manager->head = entry->next;
     entry->use_count++;
@@ -2451,7 +2554,11 @@ static struct queue_entry* select_next_entry_vertical() {
   }
   q = vector_pop_back(entry->entries);
   // push back to the old queue
-  vertical_manager_insert_to_old(vertical_manager, entry, q);
+  if (vertical_manager_select_smallest_paths) {
+    push_back(entry->old_entries, q);
+  } else {
+    vertical_manager_insert_to_old(vertical_manager, entry, q);
+  }
   LOGF("[sel] [vertical] [id %d] [dfg-path %u] [time %llu]\n", q ? q->entry_id : -1, entry->hash, get_cur_time() - start_time);
   return q;
 }
@@ -2493,6 +2600,11 @@ static struct queue_entry* select_next_entry() {
   // Use the default dafl scheduler
   if (!use_moo_scheduler) {
     return select_next_entry_dafl();
+  }
+
+  if (use_vertical_navigation) {
+    selected_entry = select_next_entry_vertical();
+    if (selected_entry) return selected_entry;
   }
 
   // Determine whether to use the vertical navigation
@@ -3937,9 +4049,9 @@ static void save_valuation(u8 crashed, u8 is_unique, u32 dfg_cksum, u32 hash, st
     struct hashmap *local_valuation_hashmap = local_entry->value_map;
     struct key_value_pair *local_valuation_kvp = hashmap_get(local_valuation_hashmap, hash);
     if (no_unique_val) {
-      vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
       if (!local_valuation_kvp)
         hashmap_insert(local_valuation_hashmap, hash, q);
+      vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
     } else {
       if (local_valuation_kvp) {
         if (q && !local_valuation_kvp->value) {
@@ -3953,7 +4065,7 @@ static void save_valuation(u8 crashed, u8 is_unique, u32 dfg_cksum, u32 hash, st
       }
     }
   } else {
-    SAYF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
+    LOGF("[error] [valuation] [no local hashmap found] [dfg-path %u] [hash %u]\n", dfg_cksum, hash);
   }
 }
 
@@ -4708,8 +4820,9 @@ static void write_crash_readme(void) {
 static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   u8  *fn = "";
-  u8  hnb;
+  u8  hnb = 0;
   u8  is_interesting = 0;
+  u32 exec_cksum = 0;
   s32 fd;
   u8  keeping = 0, res;
   u8 has_valid_unique_path = 0;
@@ -4720,6 +4833,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8 is_covered_target = 0;
   u8 is_neg_val = fault == FAULT_CRASH;
   if (fault == FAULT_CRASH || fault == FAULT_NONE) {
+    if (!use_old_dafl_seed_pool_add || crash_mode == fault) {
+      memcpy(trace_bits_tmp, trace_bits, MAP_SIZE);
+      hnb = has_new_bits(virgin_bits);
+    }
     is_covered_target = check_coverage(fault == FAULT_CRASH, argv, mem, len);
     if (is_neg_val) {
       is_neg_val = check_last_location(*last_location);
@@ -4753,30 +4870,42 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   }
   //  || (use_moo_scheduler && has_valid_unique_path)
   if ((fault == FAULT_CRASH) || (fault == FAULT_NONE)) {
-
-    hnb = has_new_bits(virgin_bits);
+    // hnb = has_new_bits(virgin_bits);
     switch (add_queue_mode) {
     case ADD_QUEUE_DEFAULT:  is_interesting = hnb; break;
     case ADD_QUEUE_UNIQUE_VAL_PER_PATH: is_interesting = vertical_is_new_valuation; break;
     case ADD_QUEUE_UNIQUE_VAL:  is_interesting = save_to_file; break;
     case ADD_QUEUE_ALL:  is_interesting = (hnb || vertical_is_new_valuation); break;
     case ADD_QUEUE_NONE:  is_interesting = 0; break;
-    default: is_interesting = hnb; break;
+    case ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER:  {
+      if (stride_scheduler_get_mode(stride_scheduler) == M_VER)
+        is_interesting = (vertical_is_new_valuation);
+      else
+        is_interesting = (hnb);
+      break;
     }
+    case ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER_PLUS_DEF: {
+      if (stride_scheduler_get_mode(stride_scheduler) == M_VER)
+        is_interesting = (hnb || vertical_is_new_valuation);
+      else
+        is_interesting = (hnb);
+      break;
+    }
+    default:
+      is_interesting = hnb;
+      break;
+    }
+
     if (use_old_dafl_seed_pool_add) {
       if (crash_mode != fault) {
         is_interesting = 0;
       }
     }
+
     if (is_interesting) {
 
     /* Keep only if there are new bits in the map, add to queue for
        future fuzzing, etc. */
-
-    // if (!(hnb = has_new_bits(virgin_bits))) {
-    //   if (crash_mode) total_crashes++;
-    //   return 0;
-    // }
       compute_proximity_score(&prox_score, dfg_bits, 0);
       vertical_is_interesting = 1;
       if (has_valid_unique_path) {
@@ -4806,11 +4935,11 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
         queued_with_cov++;
       }
 
-      queue_last->exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
-      queue_last->dfg_cksum = get_dfg_checksum();
+      queue_last->exec_cksum = hash32(trace_bits_tmp, MAP_SIZE, HASH_CONST);
+      queue_last->dfg_cksum = dfg_checksum;
       queue_last->last_location = *last_location;
-      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u] [val-hash %u] [stf %d] [neg %d]\n",
-           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location, val_hash, save_to_file, is_neg_val);
+      LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u] [val-hash %u] [stf %d] [neg %d] [exec %u]\n",
+           queue_cur ? queue_cur->entry_id : -1, queue_last->entry_id, fault == FAULT_CRASH, queue_last->dfg_cksum, prox_score.covered, prox_score.original, prox_score.adjusted, stage_short, fn, get_cur_time() - start_time, *last_location, val_hash, save_to_file, is_neg_val, queue_last->exec_cksum);
 
       /* Try to calibrate inline; this also calls update_bitmap_score() when
         successful. */
@@ -11444,7 +11573,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:UX:D:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:UX:D:A")) > 0)
 
     switch (opt) {
 
@@ -11712,6 +11841,11 @@ int main(int argc, char** argv) {
         case 'n':
           add_queue_mode = ADD_QUEUE_NONE;
           break;
+        case 'x':
+          add_queue_mode = ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER;
+        case 'y':
+          add_queue_mode = ADD_QUEUE_UNIQUE_VAL_PER_PATH_IN_VER_PLUS_DEF;
+          break;
         default:
           FATAL("Unsupported suffix or bad syntax for -q");
       }
@@ -11754,6 +11888,10 @@ int main(int argc, char** argv) {
       }
       break;
     }
+
+    case 'A':
+      vertical_manager_select_smallest_paths = 0;
+      break;
 
     default:
 
