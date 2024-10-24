@@ -1172,7 +1172,8 @@ void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry 
   if (q) push_back(entry->entries, q);
   if (vertical_manager_select_smallest_paths) {
     // Insert the entry to the sorted list only if it found new valuation
-    if (!kvp) vertical_entry_sorted_insert(manager, entry, 1);
+    u32 size = vector_size(entry->entries) + vector_size(entry->old_entries);
+    if ((!kvp && size > 0) || size == 1) vertical_entry_sorted_insert(manager, entry, 1);
     return;
   }
   if (!q) return;
