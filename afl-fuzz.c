@@ -1134,13 +1134,17 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
     return;
   }
   // First, remove the entry from the list
+  u32 original_index = 0;
+  u32 new_index = 0;
   while (cur) {
     if (cur->next == entry) {
       cur->next = entry->next;
       break;
     }
     cur = cur->next;
+    original_index++;
   }
+  new_index = original_index;
   // Then, insert the entry to the list
   // Since size does not decrease, 
   // we can start from the last location
@@ -1162,7 +1166,9 @@ void vertical_entry_sorted_insert(struct vertical_manager *manager, struct verti
       break;
     }
     cur = cur->next;
+    new_index++;
   }
+  LOGF("[vert-entry] [insert] [entry %u] [old %u] [new %u]\n", entry->hash, original_index, new_index);
 }
 
 void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
@@ -2457,7 +2463,7 @@ struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *ma
       entry = entry->next;
     }
     vertical_entry_sorted_insert(manager, entry);
-    LOGF("[vert-entry] [selected %d] [size %d]", entry ? entry->hash : -1, entry ? entry->size : 0);
+    LOGF("[vert-entry] [sel] [selected %u] [size %u]\n", entry ? entry->hash : -1, entry ? entry->size : 0);
     return entry;
   }
   if (entry) {
