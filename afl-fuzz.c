@@ -109,6 +109,8 @@ static u8 vertical_is_new_valuation = 0;
 static u8 vertical_use_dynamic = 0;
 static u8 vertical_experiment = 0;
 
+static u8 vertical_manager_select_smallest_paths = 1;
+
 static u64 explore_time = 15 * 60 * 1000; // 15 minutes
 static u64 use_explore = 0;
 static enum AddQueueMode add_queue_mode = ADD_QUEUE_DEFAULT;
@@ -1098,6 +1100,60 @@ u32 interval_tree_select(struct interval_tree *tree) {
   return interval_node_select(tree->root);
 }
 // End of interval tree
+
+struct vertical_entry *vertical_entry_create(u32 hash) {
+  struct vertical_entry *entry = ck_alloc(sizeof(struct vertical_entry));
+  entry->hash = hash;
+  entry->use_count = 0;
+  entry->size = 0;
+  entry->entries = vector_create();
+  entry->old_entries = vector_create();
+  entry->next = NULL;
+  entry->value_map = hashmap_create(8);
+  return entry;
+}
+
+void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry) {
+  struct vertical_entry *cur = manager->head;
+  if (!cur) {
+    manager->head = entry;
+    return;
+  }
+  // First, remove the entry from the list
+  while (cur) {
+    if (cur->next == entry) {
+      cur->next = entry->next;
+      break;
+    }
+    cur = cur->next;
+  }
+  // Then, insert the entry to the list
+  // We can start from the last location unless it's new
+  if (!cur) cur = manager->head;
+  while (cur) {
+    if (cur->next == NULL || cur->next->size > entry->size) {
+      entry->next = cur->next;
+      cur->next = entry;
+      return;
+    }
+    cur = cur->next;
+  }
+}
+
+void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
+  if (!q) return;
+  entry->size++;
+  push_back(entry->entries, q);
+  if (vertical_manager_select_smallest_paths) {
+    vertical_entry_sorted_insert(manager, entry);
+    return;
+  }
+  if (vector_size(entry->entries) == 0) {
+    entry->next = manager->head;
+    manager->head = entry;
+  }
+  return;
+}
 
 struct vertical_manager *vertical_manager_create() {
   struct vertical_manager *manager = ck_alloc(sizeof(struct vertical_manager));
@@ -2371,6 +2427,15 @@ struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *ma
   if (manager->head == NULL && manager->old == NULL) return NULL;
   // Pop from head
   struct vertical_entry *entry = manager->head;
+  if (vertical_manager_select_smallest_paths) {
+    // Do not move the entry to the old queue...
+    while (entry && entry->size == 0) {
+      entry = entry->next;
+    }
+    vertical_entry_sorted_insert(manager, entry);
+    LOGF("[vert-entry] [selected %d] [size %d]", entry ? entry->hash : -1, entry ? entry->size : 0);
+    return entry;
+  }
   if (entry) {
     manager->head = entry->next;
     entry->use_count++;
@@ -11453,7 +11518,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:UX:D:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QNc:r:k:s:p:u:vzyb:a:gq:UX:D:A")) > 0)
 
     switch (opt) {
 
@@ -11765,6 +11830,10 @@ int main(int argc, char** argv) {
       }
       break;
     }
+
+    case 'A':
+      vertical_manager_select_smallest_paths = 1;
+      break;
 
     default:
 

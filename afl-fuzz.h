@@ -475,6 +475,7 @@ u32 stride_scheduler_update_found_count(struct stride_scheduler *stride, u32 fou
 struct vertical_entry {
   u32 hash;                   // dfg path hash
   u32 use_count;
+  u32 size;
   struct vector *entries;
   struct vector *old_entries;
   struct vertical_entry *next;
@@ -492,70 +493,15 @@ struct vertical_manager {
   u8 use_vertical;
 };
 
-struct vertical_entry *vertical_entry_create(u32 hash) {
-  struct vertical_entry *entry = ck_alloc(sizeof(struct vertical_entry));
-  entry->hash = hash;
-  entry->use_count = 0;
-  entry->entries = vector_create();
-  entry->old_entries = vector_create();
-  entry->next = NULL;
-  entry->value_map = hashmap_create(8);
-  return entry;
-}
+struct vertical_entry *vertical_entry_create(u32 hash);
 
-void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp) {
-  if (!q) return;
-  if (vector_size(entry->entries) == 0) {
-    entry->next = manager->head;
-    manager->head = entry;
-  }
-  push_back(entry->entries, q);
-  return;
-  // old code
-  if (vector_size(entry->entries) == 0) {
-    push_back(entry->entries, q);
-    // This is the first seed for this dug-path
-    // Insert the entry to the queue
-    // If valuation is unique, insert to the front
-    if (!manager->head || !kvp) {
-      entry->next = manager->head;
-      manager->head = entry;
-    } else {
-      // If valuation is not unique, insert to the end
-      struct vertical_entry *ve = manager->head;
-      while (ve->next != NULL) {
-        ve = ve->next;
-      }
-      ve->next = entry;
-      entry->next = NULL;
-    }
-  } else {
-    // If valuation is unique, move to the front
-//    if (!kvp) {
-//      vector_push_front(entry->entries, q);
-//      struct vertical_entry *ve = manager->head;
-//      struct vertical_entry *prev = NULL;
-//      while (ve != NULL) {
-//        if (ve == entry) {
-//          if (prev) {
-//            prev->next = ve->next;
-//            ve->next = manager->head;
-//            manager->head = ve;
-//          }
-//          break;
-//        }
-//        prev = ve;
-//        ve = ve->next;
-//      }
-//    } else {
-      push_back(entry->entries, q);
-//    }
-  }
-}
+void vertical_entry_sorted_insert(struct vertical_manager *manager, struct vertical_entry *entry);
+
+void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry *entry, struct queue_entry *q, struct key_value_pair *kvp);
 
 struct vertical_manager *vertical_manager_create();
 
-struct vertical_entry *vertical_manager_select(struct vertical_manager *manager);
+struct vertical_entry *vertical_manager_select_entry(struct vertical_manager *manager);
 
 // Warning: This function has side effect
 enum VerticalMode vertical_manager_select_mode(struct vertical_manager *manager);
