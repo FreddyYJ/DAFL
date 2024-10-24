@@ -1010,7 +1010,7 @@ double interval_tree_query(struct interval_tree *tree, struct interval_node *nod
 double interval_node_ratio(struct interval_node *node) {
   if (!node) return 0.0;
   if (node->count == 0) return 0.0;
-  return (double)(node->score) / (double)(node->count);
+  return (double)(node->score); //  / (double)(node->count)
 }
 
 u8 should_split(double a, double b) {
