@@ -1185,7 +1185,7 @@ void vertical_entry_add(struct vertical_manager *manager, struct vertical_entry 
     return;
   }
   if (!q) return;
-  if (vector_size(entry->entries) == 0) {
+  if (vector_size(entry->entries) == 1) {
     entry->next = manager->head;
     manager->head = entry;
   }
