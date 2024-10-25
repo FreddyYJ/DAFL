@@ -183,7 +183,7 @@ EXP_ST struct dfg_node_info *dfg_node_info_map = NULL; /* DFG node info   */
 EXP_ST u32 dfg_target_idx = DFG_MAP_SIZE + 1; /* Target index in dfg_count_map    */
 EXP_ST u32 dfg_targets[DFG_MAP_SIZE];
 
-EXP_ST u8 trace_bits_tmp[MAP_SIZE];
+// EXP_ST u8 trace_bits_tmp[MAP_SIZE];
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -4832,10 +4832,13 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8 *valuation = NULL;
   u8 is_covered_target = 0;
   u8 is_neg_val = fault == FAULT_CRASH;
+  struct proximity_score prox_score;
   if (fault == FAULT_CRASH || fault == FAULT_NONE) {
     if (!use_old_dafl_seed_pool_add || crash_mode == fault) {
-      memcpy(trace_bits_tmp, trace_bits, MAP_SIZE);
+      // memcpy(trace_bits_tmp, trace_bits, MAP_SIZE);
+      exec_cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
       hnb = has_new_bits(virgin_bits);
+      compute_proximity_score(&prox_score, dfg_bits, 0);
     }
     is_covered_target = check_coverage(fault == FAULT_CRASH, argv, mem, len);
     if (is_neg_val) {
@@ -4843,7 +4846,6 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     }
   }
   struct queue_entry *new_seed = NULL;
-  struct proximity_score prox_score;
   u32 dfg_checksum = get_dfg_checksum();
   vertical_is_new_valuation = 0;
   pareto_scheduler_update_dfg_count(pareto_scheduler, dfg_checksum);
@@ -4906,7 +4908,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
     /* Keep only if there are new bits in the map, add to queue for
        future fuzzing, etc. */
-      compute_proximity_score(&prox_score, dfg_bits, 0);
+      // compute_proximity_score(&prox_score, dfg_bits, 0);
       vertical_is_interesting = 1;
       if (has_valid_unique_path) {
           LOGF("[moo] [uniq] [seed %d] [id %u] [moo-id %u] [cov %u] [prox %llu] [adj %f] [mut %s] [time %llu]\n",
@@ -4935,7 +4937,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
         queued_with_cov++;
       }
 
-      queue_last->exec_cksum = hash32(trace_bits_tmp, MAP_SIZE, HASH_CONST);
+      queue_last->exec_cksum = exec_cksum; // hash32(trace_bits_tmp, MAP_SIZE, HASH_CONST);
       queue_last->dfg_cksum = dfg_checksum;
       queue_last->last_location = *last_location;
       LOGF("[vertical] [save] [seed %d] [id %u] [crash %u] [dfg-path %u] [cov %u] [prox %llu] [adj %f] [mut %s] [file %s] [time %llu] [last-loc %u] [val-hash %u] [stf %d] [neg %d] [exec %u]\n",
