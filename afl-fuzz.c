@@ -849,8 +849,8 @@ static void mark_as_redundant(struct queue_entry* q, u8 state) {
 }
 
 static s32 compare_proximity_score(struct proximity_score *a, struct proximity_score *b) {
-  if (a->adjusted < b->adjusted) return -1;
-  if (a->adjusted > b->adjusted) return 1;
+  if (a->original < b->original) return -1;
+  if (a->original > b->original) return 1;
   return 0;
 }
 
