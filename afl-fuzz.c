@@ -4841,7 +4841,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
       hnb = has_new_bits(virgin_bits);
       compute_proximity_score(&prox_score, dfg_bits, 0);
     }
-    is_covered_target = check_coverage(fault == FAULT_CRASH, argv, mem, len);
+    is_covered_target = check_covered_target(); // check_coverage(fault == FAULT_CRASH, argv, mem, len);
     if (is_neg_val) {
       is_neg_val = check_last_location(*last_location);
     }
@@ -4854,7 +4854,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   //      queue_cur ? queue_cur->entry_id : -1, dfg_checksum, check_covered_target(), prox_score.original, prox_score.adjusted, stage_short, get_cur_time() - start_time);
   if (dfg_node_info_map) {
     if (is_covered_target) {
-      save_to_file = get_valuation(fault == FAULT_CRASH, argv, mem, len, dfg_checksum, &val_hash, &valuation);
+      save_to_file = get_valuation(is_neg_val, argv, mem, len, dfg_checksum, &val_hash, &valuation);
     }
     has_valid_unique_path = check_unique_path();
     if (has_valid_unique_path) {
@@ -4864,12 +4864,6 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   // Stride scheduler
   if (vertical_is_new_valuation || has_valid_unique_path) {
     stride_scheduler_update_found_count(stride_scheduler, 1);
-  }
-  if (vertical_experiment && (fault == FAULT_CRASH || fault == FAULT_NONE)) {
-    if (save_to_file) {
-      return 1;
-    }
-    return 0;
   }
   //  || (use_moo_scheduler && has_valid_unique_path)
   if ((fault == FAULT_CRASH) || (fault == FAULT_NONE)) {
