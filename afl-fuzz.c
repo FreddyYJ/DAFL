@@ -4056,6 +4056,7 @@ static void save_valuation(u8 crashed, u8 is_unique, u32 dfg_cksum, u32 hash, st
       if (local_valuation_kvp) {
         if (q && !local_valuation_kvp->value) {
           local_valuation_kvp->value = q;
+          vertical_entry_add(vertical_manager, local_entry, q, local_valuation_kvp);
         }
         return 0;
       } else {
