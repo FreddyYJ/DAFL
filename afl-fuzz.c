@@ -4070,6 +4070,155 @@ static void save_valuation(u8 crashed, u8 is_unique, u32 dfg_cksum, u32 hash, st
   }
 }
 
+/* PacFuzz : We implemented a new function that separated with run_target
+   to run the valuation binary. The reason is that we don't want shared memories
+   being affected by the valuation binary. So we removed everything related to
+   forkserver and shared memories. */
+
+static u8 run_valuation_binary(char** argv, u32 timeout, char* env_opt) {
+
+  static struct itimerval it;
+  static u32 prev_timed_out = 0;
+  static u64 exec_ms = 0;
+
+  int status = 0;
+  u8 is_run_failed;
+
+  child_timed_out = 0;
+  child_pid = fork();
+  
+  if (child_pid < 0) PFATAL("[PacFuzz] [run_valuation_binary] fork() failed");
+
+    if (!child_pid) {
+
+      struct rlimit r;
+
+      if (mem_limit) {
+
+        r.rlim_max = r.rlim_cur = ((rlim_t)mem_limit) << 20;
+
+#ifdef RLIMIT_AS
+
+        setrlimit(RLIMIT_AS, &r); /* Ignore errors */
+
+#else
+
+        setrlimit(RLIMIT_DATA, &r); /* Ignore errors */
+
+#endif /* ^RLIMIT_AS */
+
+      }
+
+      r.rlim_max = r.rlim_cur = 0;
+
+      setrlimit(RLIMIT_CORE, &r); /* Ignore errors */
+
+      /* Isolate the process and configure standard descriptors. If out_file is
+         specified, stdin is /dev/null; otherwise, out_fd is cloned instead. */
+
+      setsid();
+
+      dup2(dev_null_fd, 1);
+      dup2(dev_null_fd, 2);
+
+      if (out_file) {
+
+        dup2(dev_null_fd, 0);
+
+      } else {
+
+        dup2(out_fd, 0);
+        close(out_fd);
+
+      }
+
+      /* On Linux, would be faster to use O_CLOEXEC. Maybe TODO. */
+
+      close(dev_null_fd);
+      close(out_dir_fd);
+      close(dev_urandom_fd);
+      close(fileno(plot_file));
+
+      /* Set sane defaults for ASAN if nothing else specified. */
+
+      char *envp[] =
+      {
+          "ASAN_OPTIONS=abort_on_error=1:halt_on_error=1:detect_leaks=0:symbolize=0:allocator_may_return_null=1",
+          "MSAN_OPTIONS=exit_code=86:halt_on_error=1:symbolize=0:msan_track_origins=0",
+          "UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1:exit_code=54:print_stacktrace=1",
+          env_opt,
+          0
+      };
+
+      execve(argv[0], argv, envp);
+
+      /* Use a distinctive bitmap value to tell the parent about execv()
+         falling through. */
+
+      LOGF("[PacFuzz] [run_valuation_binary] execv() failed\n");
+      is_run_failed = 1;
+      exit(0);
+    }
+
+  /* Configure timeout, as requested by user, then wait for child to terminate. */
+
+  it.it_value.tv_sec = (timeout / 1000);
+  it.it_value.tv_usec = (timeout % 1000) * 1000;
+
+  setitimer(ITIMER_REAL, &it, NULL);
+
+  /* The SIGALRM handler simply kills the child_pid and sets child_timed_out. */
+
+  if (waitpid(child_pid, &status, 0) <= 0) PFATAL("[PacFuzz] [run_valuation_binary] waitpid() failed");
+
+  if (!WIFSTOPPED(status)) child_pid = 0;
+
+  getitimer(ITIMER_REAL, &it);
+  exec_ms = (u64) timeout - (it.it_value.tv_sec * 1000 +
+                             it.it_value.tv_usec / 1000);
+
+  it.it_value.tv_sec = 0;
+  it.it_value.tv_usec = 0;
+
+  setitimer(ITIMER_REAL, &it, NULL);
+
+  total_execs++;
+
+  prev_timed_out = child_timed_out;
+
+  /* Report outcome to caller. */
+
+  if (WIFSIGNALED(status) && !stop_soon) {
+
+    kill_signal = WTERMSIG(status);
+
+    if (child_timed_out && kill_signal == SIGKILL) return FAULT_TMOUT;
+
+    return FAULT_CRASH;
+
+  }
+
+  /* A somewhat nasty hack for MSAN, which doesn't support abort_on_error and
+     must use a special exit code. */
+
+  if (uses_asan && WEXITSTATUS(status) == MSAN_ERROR) {
+    kill_signal = 0;
+    return FAULT_CRASH;
+  }
+
+  if (is_run_failed)
+    return FAULT_ERROR;
+
+  /* It makes sense to account for the slowest units only if the testcase was run
+  under the user defined timeout. */
+  if (!(timeout > exec_tmout) && (slowest_exec_ms < exec_ms)) {
+    slowest_exec_ms = exec_ms;
+  }
+
+  return FAULT_NONE;
+
+}
+
 static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cksum, u32 *val_hash, u8 **valuation_file) {
   u8 *valexe = "";
   u8 *covdir = "";
@@ -4095,7 +4244,7 @@ static u8 get_valuation(u8 crashed, char** argv, void* mem, u32 len, u32 dfg_cks
   write_to_testcase(mem, len);
   tmp_argv1 = argv[0];
   argv[0] = valexe;
-  fault_tmp = run_target(argv, 10000, tmpfile_env, 1);
+  fault_tmp = run_valuation_binary(argv, 10000, tmpfile_env);
   argv[0] = tmp_argv1;
   ck_free(tmpfile_env);
 
